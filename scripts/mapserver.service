@@ -1,0 +1,27 @@
+[Unit]
+Description=MapServer — 矢量瓦片 / WMS / WFS / WMTS 地图服务
+Documentation=file:/opt/mapserver/README.md
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mapserver
+Group=mapserver
+WorkingDirectory=/opt/mapserver
+EnvironmentFile=-/opt/mapserver/.env
+ExecStart=/opt/mapserver/mapserver
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=15
+LimitNOFILE=65535
+
+# 安全加固
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/opt/mapserver/data
+
+[Install]
+WantedBy=multi-user.target

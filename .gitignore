@@ -1,0 +1,27 @@
+# 依赖
+node_modules/
+vendor/
+
+# 测试产物
+coverage/
+*.out
+
+# build output
+bin/
+dist/
+*.exe
+*.tsbuildinfo
+
+# 内嵌前端产物（构建时生成，保留占位文件）
+backend/internal/web/dist/*
+!backend/internal/web/dist/.gitkeep
+
+# env
+.env
+.env.local
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
+*.log

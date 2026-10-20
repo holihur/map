@@ -1,0 +1,216 @@
+// Package api 提供 HTTP 路由与处理器。
+package api
+
+import (
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/cors"
+
+	"mapserver/internal/auth"
+	"mapserver/internal/cache"
+	"mapserver/internal/config"
+	"mapserver/internal/metrics"
+	"mapserver/internal/store"
+	"mapserver/internal/web"
+)
+
+// Handlers 持有依赖。
+type Handlers struct {
+	store    *store.Store
+	cfg      config.Config
+	log      *slog.Logger
+	auth     *auth.Authenticator
+	tiles    *cache.ByteCache
+	meta     *cache.ByteCache
+	disk     *cache.DiskCache
+	web      *web.Handler
+	metrics  *metrics.Registry
+	rate     *rateLimiter
+	versions *tokenVersionCache
+}
+
+// NewRouter 构造带全部路由的 http.Handler。
+func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handler {
+	h := &Handlers{
+		store:    st,
+		cfg:      cfg,
+		log:      log,
+		auth:     auth.NewAuthenticator([]byte(cfg.JWTSecret)),
+		tiles:    cache.NewByteCache(cfg.TileCacheEntries, cfg.TileCacheTTL),
+		meta:     cache.NewByteCache(64, cfg.MetaCacheTTL),
+		disk:     cache.NewDiskCache(cfg.TileCacheDir, cfg.TileDiskTTL, int64(cfg.TileCacheMaxMB)*1024*1024),
+		web:      web.New(cfg.StaticDir),
+		metrics:  metrics.New(),
+		rate:     newRateLimiter(cfg.RateLimitRPS, cfg.RateLimitBurst),
+		versions: newTokenVersionCache(30 * time.Second),
+	}
+	h.auth.SetVersionCheck(h.userTokenVersion)
+	h.registerMetrics()
+	if h.web.Enabled() {
+		log.Info("已启用前端静态托管", "source", h.web.Source())
+	} else {
+		log.Warn("未找到前端构建产物，仅提供 API（请先执行 make frontend-build）")
+	}
+	if h.disk.Enabled() {
+		log.Info("已启用瓦片磁盘缓存", "dir", h.disk.Root(), "maxMB", cfg.TileCacheMaxMB)
+		// 定期清理过期缓存文件
+		go func() {
+			ticker := time.NewTicker(10 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				if n := h.disk.CleanupExpired(); n > 0 {
+					log.Info("清理过期瓦片缓存", "removed", n)
+				}
+			}
+		}()
+	}
+
+	editorOnly := h.auth.RequireRole(auth.RoleEditor)
+	adminOnly := h.auth.RequireRole(auth.RoleAdmin)
+
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+	r.Use(middleware.Compress(5))
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   cfg.CORSOrigins,
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "If-None-Match"},
+		ExposedHeaders:   []string{"Content-Length", "ETag"},
+		AllowCredentials: false,
+		MaxAge:           300,
+	}))
+	r.Use(h.auth.Middleware)
+	r.Use(h.rateLimit)
+	r.Use(securityHeaders)
+	r.Use(h.metricsMiddleware)
+
+	r.Get("/health", h.health)
+	r.Get("/metrics", h.metricsHandler)
+	r.Get("/api/capabilities", h.capabilities)
+	r.Get("/api/stats", h.stats)
+	r.Get("/api/crs", h.listCRS)
+	r.Get("/api/crs/{srid}", h.getCRS)
+	r.Get("/api/tilematrixsets", h.listTileMatrixSets)
+	r.Get("/api/export", h.exportAll)
+	r.Get("/api/wms", h.wms)
+	r.Get("/api/wfs", h.wfs)
+	r.With(editorOnly).Post("/api/wfs", h.wfsTransaction)
+	r.With(adminOnly).Post("/api/cache/purge", h.purgeCache)
+
+	// 认证
+	r.Post("/api/auth/login", h.login)
+	r.With(h.auth.RequireAuth).Get("/api/auth/me", h.me)
+	r.With(h.auth.RequireAuth).Post("/api/auth/refresh", h.refreshToken)
+	r.With(h.auth.RequireAuth).Post("/api/auth/logout-all", h.logoutAll)
+
+	// 用户管理
+	r.Route("/api/users", func(r chi.Router) {
+		r.Use(adminOnly)
+		r.Get("/", h.listUsers)
+		r.Post("/", h.createUser)
+		r.Put("/{id}", h.updateUser)
+		r.Delete("/{id}", h.deleteUser)
+	})
+
+	r.Route("/api/layers", func(r chi.Router) {
+		r.Get("/", h.listLayers)
+		r.With(editorOnly).Post("/", h.createLayer)
+		r.Route("/{layer}", func(r chi.Router) {
+			r.Get("/", h.getLayer)
+			r.With(editorOnly).Patch("/", h.updateLayer)
+			r.With(editorOnly).Put("/", h.updateLayer)
+			r.With(adminOnly).Delete("/", h.deleteLayer)
+			r.Get("/bounds", h.layerBounds)
+			r.With(editorOnly).Post("/transform", h.transformLayer)
+			r.Get("/export", h.exportLayer)
+			r.With(editorOnly).Post("/import", h.importLayer)
+			r.Get("/features", h.listFeatures)
+			r.With(editorOnly).Post("/features", h.createFeatures)
+			r.Get("/features/{fid}", h.getFeature)
+			r.With(editorOnly).Patch("/features/{fid}", h.updateFeature)
+			r.With(editorOnly).Put("/features/{fid}", h.updateFeature)
+			r.With(editorOnly).Delete("/features/{fid}", h.deleteFeature)
+		})
+	})
+
+	r.Get("/api/tiles/{layer}/{z}/{x}/{y}.mvt", h.tileMVT)
+	r.Get("/api/tiles/{layer}/{z}/{x}/{y}.pbf", h.tileMVT)
+	r.Get("/api/tiles/{layer}/{z}/{x}/{y}.png", h.tilePNG)
+	r.Get("/api/tiles/{layer}/{tms}/{z}/{x}/{y}.mvt", h.tileMVT)
+	r.Get("/api/tiles/{layer}/{tms}/{z}/{x}/{y}.pbf", h.tileMVT)
+	r.Get("/api/tiles/{layer}/{tms}/{z}/{x}/{y}.png", h.tilePNG)
+
+	r.Get("/api/wmts", h.wmtsKVP)
+	r.Get("/api/wmts/rest/{layer}/{style}/{tms}/{z}/{y}/{x}.{ext}", h.wmtsREST)
+	r.Route("/api/styles", func(r chi.Router) {
+		r.Get("/", h.listStyles)
+		r.With(editorOnly).Post("/", h.createStyle)
+		r.With(editorOnly).Post("/sld", h.uploadSLD)
+		r.Get("/{name}", h.getStyle)
+		r.With(editorOnly).Put("/{id}", h.updateStyle)
+		r.With(editorOnly).Delete("/{id}", h.deleteStyle)
+	})
+
+	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
+		// 非 API 的 GET/HEAD 请求交给前端（SPA 路由回退）。
+		if h.web.Enabled() && (r.Method == http.MethodGet || r.Method == http.MethodHead) &&
+			!strings.HasPrefix(r.URL.Path, "/api/") {
+			h.web.ServeHTTP(w, r)
+			return
+		}
+		writeError(w, http.StatusNotFound, errors.New("route not found"))
+	})
+	return r
+}
+
+func (h *Handlers) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "mapserver"})
+}
+
+// invalidateLayer 使指定图层的瓦片缓存（内存 + 磁盘）与全部元数据缓存失效。
+func (h *Handlers) invalidateLayer(name string) {
+	h.tiles.InvalidatePrefix(name + "/")
+	_ = h.disk.RemovePrefix(name + "/")
+	h.meta.Purge()
+}
+
+// invalidateMeta 仅使元数据缓存失效。
+func (h *Handlers) invalidateMeta() { h.meta.Purge() }
+
+// ── 通用响应工具 ────────────────────────────────────────────────
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if v != nil {
+		_ = json.NewEncoder(w).Encode(v)
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]any{"error": err.Error()})
+}
+
+func decodeJSON(r *http.Request, v any) error {
+	defer r.Body.Close()
+	dec := json.NewDecoder(r.Body)
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+// statusForError 将 store 错误映射为 HTTP 状态码。
+func statusForError(err error) int {
+	if errors.Is(err, store.ErrNotFound) {
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
+}
