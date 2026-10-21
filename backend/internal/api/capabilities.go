@@ -1,16 +1,14 @@
 package api
 
-import (
-	"encoding/json"
-	"net/http"
-)
+import "net/http"
 
 // capabilities 输出服务能力文档（参考 WMS/WFS GetCapabilities 的 JSON 形式）。
 func (h *Handlers) capabilities(w http.ResponseWriter, r *http.Request) {
-	writeCachedJSON(w, r, h.meta, "capabilities", func() ([]byte, error) {
-		layers, err := h.store.ListLayers(r.Context())
+	{
+		layers, err := h.readableLayers(r.Context())
 		if err != nil {
-			return nil, err
+			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
 		styles, _ := h.store.ListStyles(r.Context())
 
@@ -68,6 +66,6 @@ func (h *Handlers) capabilities(w http.ResponseWriter, r *http.Request) {
 			"layers": infos,
 			"styles": styles,
 		}
-		return json.Marshal(doc)
-	})
+		writeJSON(w, http.StatusOK, doc)
+	}
 }

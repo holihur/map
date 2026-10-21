@@ -1,12 +1,18 @@
 import type {
+  APIKey,
+  AuditLog,
   CRS,
   Capabilities,
   CreateLayerInput,
   FeatureCollection,
   FeatureQuery,
+  FieldStat,
   GeoJSONFeature,
   Layer,
   MapStyle,
+  MapWorkspace,
+  SearchResponse,
+  SharedMap,
   TileMatrixSet,
 } from "@/types";
 
@@ -193,9 +199,19 @@ export function wfsCapabilitiesUrl(): string {
 }
 
 /** 图层数据导出地址。 */
-export function exportUrl(layerName: string, format: string, outSrid?: number): string {
+export function exportUrl(
+  layerName: string,
+  format: string,
+  opts?: number | { outSrid?: number; bbox?: string; query?: string; filters?: Record<string, string> }
+): string {
   const params = new URLSearchParams({ format });
-  if (outSrid) params.set("outSrid", String(outSrid));
+  const o = typeof opts === "number" ? { outSrid: opts } : opts;
+  if (o?.outSrid) params.set("outSrid", String(o.outSrid));
+  if (o?.bbox) params.set("bbox", o.bbox);
+  if (o?.query) params.set("q", o.query);
+  for (const [k, v] of Object.entries(o?.filters ?? {})) {
+    params.set(`f.${k}`, v);
+  }
   return `${API_BASE}/api/layers/${encodeURIComponent(layerName)}/export?${params.toString()}`;
 }
 
@@ -227,11 +243,15 @@ export async function uploadSLD(
 export async function importLayer(
   layerName: string,
   file: File,
-  srid = 4326
-): Promise<{ imported: number; format: string; layer: string }> {
+  srid = 4326,
+  mapping?: Record<string, string>
+): Promise<{ imported: number; failed?: number; errors?: string[]; format: string; layer: string }> {
   const fd = new FormData();
   fd.append("file", file);
   fd.append("srid", String(srid));
+  if (mapping && Object.keys(mapping).length > 0) {
+    fd.append("mapping", JSON.stringify(mapping));
+  }
   return request(`/api/layers/${encodeURIComponent(layerName)}/import`, {
     method: "POST",
     body: fd,
@@ -320,6 +340,8 @@ export async function listFeatures(
   const params = new URLSearchParams();
   if (query.bbox) params.set("bbox", query.bbox);
   if (query.bboxSrid != null) params.set("bboxSrid", String(query.bboxSrid));
+  if (query.ids?.length) params.set("ids", query.ids.join(","));
+  if (query.q) params.set("q", query.q);
   if (query.limit != null) params.set("limit", String(query.limit));
   if (query.offset != null) params.set("offset", String(query.offset));
   if (query.outSrid != null) params.set("outSrid", String(query.outSrid));
@@ -473,4 +495,232 @@ export function wmsGetMapUrl(opts: {
     TRANSPARENT: opts.transparent === false ? "FALSE" : "TRUE",
   });
   return `${API_BASE}/api/wms?${params.toString()}`;
+}
+
+// ── 图层排序 / 统计 / 访问 ──────────────────────────────────────
+
+export async function reorderLayers(names: string[]): Promise<void> {
+  await request<{ ok: boolean }>("/api/layers/reorder", {
+    method: "POST",
+    body: JSON.stringify({ names }),
+  });
+}
+
+export async function layerStats(name: string): Promise<FieldStat[]> {
+  const data = await request<{ stats: FieldStat[] }>(
+    `/api/layers/${encodeURIComponent(name)}/stats`
+  );
+  return data.stats ?? [];
+}
+
+export async function batchFeatures(
+  layerName: string,
+  input: {
+    action: "delete" | "update";
+    ids?: number[];
+    filters?: Record<string, string>;
+    bbox?: [number, number, number, number];
+    properties?: Record<string, unknown>;
+  }
+): Promise<number> {
+  const data = await request<{ affected: number }>(
+    `/api/layers/${encodeURIComponent(layerName)}/features/batch`,
+    { method: "POST", body: JSON.stringify(input) }
+  );
+  return data.affected ?? 0;
+}
+
+export interface LayerAccess {
+  userId: number;
+  username: string;
+  level: "read" | "write";
+}
+
+export async function getLayerAccess(
+  name: string
+): Promise<{ visibility: "public" | "private"; access: LayerAccess[] }> {
+  return request(`/api/layers/${encodeURIComponent(name)}/access`);
+}
+
+export async function setLayerAccess(
+  name: string,
+  visibility: "public" | "private",
+  access: LayerAccess[]
+): Promise<{ visibility: "public" | "private"; access: LayerAccess[] }> {
+  return request(`/api/layers/${encodeURIComponent(name)}/access`, {
+    method: "PUT",
+    body: JSON.stringify({ visibility, access }),
+  });
+}
+
+// ── 自动建层导入 ────────────────────────────────────────────────
+
+export interface ImportPreview {
+  preview: true;
+  name: string;
+  format: string;
+  srid: number;
+  geometryType: string;
+  fields: Array<{ name: string; type: string }>;
+  count: number;
+  sample: Array<Record<string, unknown>>;
+}
+
+export interface ImportResult {
+  layer: Layer;
+  imported: number;
+  failed: number;
+  errors: string[];
+  format: string;
+  geometryType: string;
+}
+
+export async function previewImportLayer(
+  file: File,
+  srid = 4326,
+  name = ""
+): Promise<ImportPreview> {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("srid", String(srid));
+  fd.append("name", name);
+  fd.append("preview", "true");
+  return request<ImportPreview>("/api/layers/import", { method: "POST", body: fd });
+}
+
+export async function importNewLayer(
+  file: File,
+  opts: { srid?: number; name?: string; title?: string; table?: string } = {}
+): Promise<ImportResult> {
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("srid", String(opts.srid ?? 4326));
+  if (opts.name) fd.append("name", opts.name);
+  if (opts.title) fd.append("title", opts.title);
+  if (opts.table) fd.append("table", opts.table);
+  return request<ImportResult>("/api/layers/import", { method: "POST", body: fd });
+}
+
+// ── 搜索 ────────────────────────────────────────────────────────
+
+export async function searchAll(
+  q: string,
+  opts: { layer?: string; limit?: number } = {}
+): Promise<SearchResponse> {
+  const params = new URLSearchParams({ q });
+  if (opts.layer) params.set("layer", opts.layer);
+  if (opts.limit) params.set("limit", String(opts.limit));
+  return request<SearchResponse>(`/api/search?${params.toString()}`);
+}
+
+// ── 地图分享 ────────────────────────────────────────────────────
+
+export async function listMaps(): Promise<SharedMap[]> {
+  const data = await request<{ maps: SharedMap[] }>("/api/maps");
+  return data.maps ?? [];
+}
+
+export async function createMap(
+  name: string,
+  state: MapWorkspace,
+  isPublic = true
+): Promise<SharedMap> {
+  return request<SharedMap>("/api/maps", {
+    method: "POST",
+    body: JSON.stringify({ name, state, isPublic }),
+  });
+}
+
+export async function getMap(token: string): Promise<SharedMap> {
+  return request<SharedMap>(`/api/maps/${encodeURIComponent(token)}`);
+}
+
+export async function updateMap(
+  token: string,
+  patch: { name?: string; state?: MapWorkspace; isPublic?: boolean }
+): Promise<SharedMap> {
+  return request<SharedMap>(`/api/maps/${encodeURIComponent(token)}`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteMap(token: string): Promise<void> {
+  await request<void>(`/api/maps/${encodeURIComponent(token)}`, { method: "DELETE" });
+}
+
+// ── API Key / 审计 ─────────────────────────────────────────────
+
+export async function listAPIKeys(): Promise<APIKey[]> {
+  const data = await request<{ keys: APIKey[] }>("/api/apikeys");
+  return data.keys ?? [];
+}
+
+export async function createAPIKey(input: {
+  name: string;
+  role: string;
+  layerName?: string;
+}): Promise<{ key: APIKey; plaintext: string }> {
+  return request("/api/apikeys", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function revokeAPIKey(id: number): Promise<void> {
+  await request(`/api/apikeys/${id}/revoke`, { method: "POST" });
+}
+
+export async function deleteAPIKey(id: number): Promise<void> {
+  await request<void>(`/api/apikeys/${id}`, { method: "DELETE" });
+}
+
+export async function listAuditLogs(opts: { limit?: number; layer?: string } = {}): Promise<AuditLog[]> {
+  const params = new URLSearchParams();
+  if (opts.limit) params.set("limit", String(opts.limit));
+  if (opts.layer) params.set("layer", opts.layer);
+  const data = await request<{ logs: AuditLog[] }>(`/api/audit?${params.toString()}`);
+  return data.logs ?? [];
+}
+
+/** 多图层 WMS GetMap 地址（用于导出当前视图图片）。 */
+export function wmsGetMapMultiUrl(opts: {
+  layers: string[];
+  bbox: [number, number, number, number];
+  width: number;
+  height: number;
+  transparent?: boolean;
+}): string {
+  const [minx, miny, maxx, maxy] = opts.bbox;
+  // WMS 1.3.0 的 EPSG:4326 轴顺序为 lat,lon
+  const params = new URLSearchParams({
+    SERVICE: "WMS",
+    VERSION: "1.3.0",
+    REQUEST: "GetMap",
+    LAYERS: opts.layers.join(","),
+    CRS: "EPSG:4326",
+    BBOX: [miny, minx, maxy, maxx].join(","),
+    WIDTH: String(Math.round(opts.width)),
+    HEIGHT: String(Math.round(opts.height)),
+    FORMAT: "image/png",
+    TRANSPARENT: opts.transparent === false ? "FALSE" : "TRUE",
+  });
+  return `${API_BASE}/api/wms?${params.toString()}`;
+}
+
+/** 对筛选结果做空间分析，返回 GeoJSON FeatureCollection。 */
+export async function analyzeFeatures(
+  layerName: string,
+  input: {
+    op: "buffer" | "centroid" | "convexhull" | "simplify" | "envelope";
+    distance?: number;
+    tolerance?: number;
+    ids?: number[];
+    bbox?: [number, number, number, number];
+    filters?: Record<string, string>;
+    outSrid?: number;
+    limit?: number;
+  }
+): Promise<unknown> {
+  return request(`/api/layers/${encodeURIComponent(layerName)}/analyze`, {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }

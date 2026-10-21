@@ -49,6 +49,10 @@ func (h *Handlers) serveWMSTile(w http.ResponseWriter, r *http.Request, layerNam
 		wmtsException(w, "TileOutOfRange", "图层不存在: "+layerName)
 		return
 	}
+	if !h.layerReadAllowed(r.Context(), layer) {
+		wmtsException(w, "PermissionDenied", "没有该图层的访问权限")
+		return
+	}
 	grid := tiles.Default()
 	if tmsID != "" {
 		g, ok := tiles.Get(tmsID)
@@ -78,7 +82,7 @@ func (h *Handlers) serveWMSTile(w http.ResponseWriter, r *http.Request, layerNam
 	}
 
 	if strings.Contains(lower, "vector") || strings.Contains(lower, "mvt") || strings.Contains(lower, "pbf") {
-		data, err := h.store.TileMVT(r.Context(), layer, 4096, grid.SRID, env)
+		data, err := h.store.TileMVT(r.Context(), layer, 4096, grid.SRID, z, h.cfg.TileMaxFeatures, h.cfg.TileSimplify, env)
 		if err != nil {
 			wmtsException(w, "NoApplicableCode", err.Error())
 			return
@@ -97,7 +101,7 @@ func (h *Handlers) serveWMSTile(w http.ResponseWriter, r *http.Request, layerNam
 
 func (h *Handlers) wmtsCapabilities(w http.ResponseWriter, r *http.Request) {
 	base := requestBaseURL(r)
-	layers, err := h.store.ListLayers(r.Context())
+	layers, err := h.readableLayers(r.Context())
 	if err != nil {
 		wmtsException(w, "NoApplicableCode", err.Error())
 		return

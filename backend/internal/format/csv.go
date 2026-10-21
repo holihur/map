@@ -89,13 +89,30 @@ func ParseCSV(r io.Reader, fields []models.Field) ([]ImportFeature, error) {
 			continue
 		}
 		props := map[string]any{}
-		for _, f := range fields {
-			i, ok := idx[strings.ToLower(f.Name)]
-			if !ok || i >= len(row) {
-				continue
+		if len(fields) == 0 {
+			// 未指定字段时导入全部列（排除几何辅助列）。
+			for i, h := range header {
+				name := strings.TrimSpace(h)
+				lower := strings.ToLower(name)
+				switch lower {
+				case "wkt", "geom", "geometry", "the_geom", "lon", "lng", "longitude", "lat", "latitude", "x", "y", "fid":
+					continue
+				}
+				if i < len(row) {
+					if v := strings.TrimSpace(row[i]); v != "" {
+						props[name] = v
+					}
+				}
 			}
-			if v := strings.TrimSpace(row[i]); v != "" {
-				props[f.Name] = v
+		} else {
+			for _, f := range fields {
+				i, ok := idx[strings.ToLower(f.Name)]
+				if !ok || i >= len(row) {
+					continue
+				}
+				if v := strings.TrimSpace(row[i]); v != "" {
+					props[f.Name] = v
+				}
 			}
 		}
 

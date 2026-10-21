@@ -22,15 +22,17 @@ type Filter struct {
 
 // FeatureQuery 描述要素查询参数。
 type FeatureQuery struct {
-	BBox      *[4]float64 // minx,miny,maxx,maxy
-	BBoxSRID  int         // BBox 所在坐标系，默认 4326
-	Filters   []Filter
-	Limit     int
-	Offset    int
-	OutSRID   int // 输出坐标系，默认 4326
-	Simplify  float64
-	OrderBy   string
-	OrderDesc bool
+	BBox       *[4]float64 // minx,miny,maxx,maxy
+	BBoxSRID   int         // BBox 所在坐标系，默认 4326
+	Filters    []Filter
+	IDs        []int64 // 只返回指定 fid
+	TextSearch string  // 在所有 text 字段中模糊搜索
+	Limit      int
+	Offset     int
+	OutSRID    int // 输出坐标系，默认 4326
+	Simplify   float64
+	OrderBy    string
+	OrderDesc  bool
 }
 
 type whereBuilder struct {
@@ -64,6 +66,22 @@ func buildWhere(l *models.Layer, q *FeatureQuery, w *whereBuilder) error {
 			p1, p2, p3, p4, bboxSRID, l.SRID))
 	}
 
+	if len(q.IDs) > 0 {
+		w.add("t.fid = ANY(" + w.arg(q.IDs) + ")")
+	}
+
+	if term := strings.TrimSpace(q.TextSearch); term != "" {
+		ors := make([]string, 0)
+		for _, f := range l.Fields {
+			if f.Type == models.FieldText {
+				ors = append(ors, "t."+quoteIdent(strings.ToLower(f.Name))+" ILIKE "+w.arg("%"+term+"%"))
+			}
+		}
+		if len(ors) > 0 {
+			w.add("(" + strings.Join(ors, " OR ") + ")")
+		}
+	}
+
 	fieldTypes := map[string]models.FieldType{}
 	for _, f := range l.Fields {
 		fieldTypes[strings.ToLower(f.Name)] = f.Type
@@ -91,6 +109,15 @@ func buildWhere(l *models.Layer, q *FeatureQuery, w *whereBuilder) error {
 			w.add(col + " <= " + w.arg(mustConvert(ft, f.Value)))
 		case "like":
 			w.add(col + " ILIKE " + w.arg("%"+f.Value+"%"))
+		case "in":
+			vals := strings.Split(f.Value, ",")
+			ors := make([]string, 0, len(vals))
+			for _, v := range vals {
+				ors = append(ors, col+" = "+w.arg(mustConvert(ft, strings.TrimSpace(v))))
+			}
+			if len(ors) > 0 {
+				w.add("(" + strings.Join(ors, " OR ") + ")")
+			}
 		case "notnull":
 			w.add(col + " IS NOT NULL")
 		case "isnull":
@@ -491,7 +518,7 @@ func (s *Store) DeleteFeature(ctx context.Context, l *models.Layer, fid int64) e
 
 // TileMVT 生成指定瓦片的 Mapbox Vector Tile。
 // gridSRID 为瓦片矩阵集的坐标系（通常 3857 或 4326），env 为瓦片在该坐标系下的范围。
-func (s *Store) TileMVT(ctx context.Context, l *models.Layer, extent, gridSRID int, env [4]float64) ([]byte, error) {
+func (s *Store) TileMVT(ctx context.Context, l *models.Layer, extent, gridSRID, zoom, maxFeatures int, simplify bool, env [4]float64) ([]byte, error) {
 	if !validIdent(l.TableName) {
 		return nil, fmt.Errorf("invalid table name")
 	}
@@ -509,18 +536,43 @@ func (s *Store) TileMVT(ctx context.Context, l *models.Layer, extent, gridSRID i
 	}
 	colList := strings.Join(cols, ", ")
 
+	// 低缩放级别：按瓦片像素（extent）的一半作为简化容差，避免把全量节点编码进瓦片。
+	width := env[2] - env[0]
+	if width <= 0 {
+		width = 1
+	}
+	tolerance := 0.0
+	if simplify {
+		tolerance = width / float64(extent) * 0.5
+	}
+
+	// 每个瓦片最多编码 maxFeatures 个要素；低缩放级别进一步收紧。
+	if maxFeatures <= 0 {
+		maxFeatures = 5000
+	}
+	if zoom <= 4 && maxFeatures > 1500 {
+		maxFeatures = 1500
+	}
+
 	sql := fmt.Sprintf(`
 		WITH bounds AS (
 			SELECT ST_MakeEnvelope($1, $2, $3, $4, %d) AS geom
-		), mvt AS (
+		), src AS (
 			SELECT %s,
-				ST_AsMVTGeom(ST_Transform(t.geom, %d), bounds.geom, $5::int, 64, true) AS geom
+				ST_Transform(t.geom, %d) AS g
 			FROM %s t, bounds
 			WHERE t.geom IS NOT NULL
 			  AND t.geom && ST_Transform(bounds.geom, %d)
+			ORDER BY ST_Area(ST_Transform(t.geom, %d)) DESC, ST_NPoints(t.geom) DESC
+			LIMIT %d
+		), mvt AS (
+			SELECT %s,
+				ST_AsMVTGeom(ST_SimplifyPreserveTopology(g, %g), bounds.geom, $5::int, 64, true) AS geom
+			FROM src t, bounds
 		)
 		SELECT COALESCE(ST_AsMVT(mvt.*, $6::text, $5::int, 'geom', 'fid'), ''::bytea) FROM mvt`,
-		gridSRID, colList, gridSRID, quoteIdent(l.TableName), l.SRID)
+		gridSRID, colList, gridSRID, quoteIdent(l.TableName), l.SRID, gridSRID, maxFeatures,
+		colList, tolerance)
 
 	var data []byte
 	if err := s.pool.QueryRow(ctx, sql, env[0], env[1], env[2], env[3], extent, l.Name).Scan(&data); err != nil {
@@ -623,4 +675,205 @@ func whereClause(conds []string) string {
 		return ""
 	}
 	return "WHERE " + strings.Join(conds, " AND ")
+}
+
+// DeleteFeaturesWhere 按完整查询条件（ids / bbox / filters / text）删除要素。
+func (s *Store) DeleteFeaturesWhere(ctx context.Context, l *models.Layer, q FeatureQuery) (int64, error) {
+	if !validIdent(l.TableName) {
+		return 0, fmt.Errorf("invalid table name")
+	}
+	w := &whereBuilder{}
+	if err := buildWhere(l, &q, w); err != nil {
+		return 0, err
+	}
+	if len(w.conds) == 0 {
+		return 0, fmt.Errorf("拒绝删除全部要素：请提供筛选条件")
+	}
+	sql := "DELETE FROM " + quoteIdent(l.TableName) + " t " + whereClause(w.conds)
+	tag, err := s.pool.Exec(ctx, sql, w.args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// UpdateFeaturesWhere 按完整查询条件批量更新属性。
+func (s *Store) UpdateFeaturesWhere(ctx context.Context, l *models.Layer, q FeatureQuery, props map[string]any) (int64, error) {
+	if !validIdent(l.TableName) {
+		return 0, fmt.Errorf("invalid table name")
+	}
+	if len(props) == 0 {
+		return 0, fmt.Errorf("没有要更新的属性")
+	}
+	w := &whereBuilder{}
+	if err := buildWhere(l, &q, w); err != nil {
+		return 0, err
+	}
+	if len(w.conds) == 0 {
+		return 0, fmt.Errorf("拒绝更新全部要素：请提供筛选条件")
+	}
+	sets := make([]string, 0, len(props)+1)
+	for _, f := range l.Fields {
+		v, ok := props[f.Name]
+		if !ok {
+			continue
+		}
+		val, err := normalize(f.Type, v)
+		if err != nil {
+			return 0, fmt.Errorf("字段 %s: %w", f.Name, err)
+		}
+		sets = append(sets, quoteIdent(strings.ToLower(f.Name))+" = "+w.arg(val))
+	}
+	if len(sets) == 0 {
+		return 0, fmt.Errorf("属性中没有匹配的字段")
+	}
+	sets = append(sets, "updated_at = now()")
+	sql := "UPDATE " + quoteIdent(l.TableName) + " t SET " + strings.Join(sets, ", ") + " " + whereClause(w.conds)
+	tag, err := s.pool.Exec(ctx, sql, w.args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
+// FieldStat 描述一个属性字段的统计信息（用于样式分级 / 数据概览）。
+type FieldStat struct {
+	Field    string       `json:"field"`
+	Type     string       `json:"type"`
+	Count    int64        `json:"count"`
+	Nulls    int64        `json:"nulls"`
+	Distinct int64        `json:"distinct"`
+	Min      any          `json:"min,omitempty"`
+	Max      any          `json:"max,omitempty"`
+	Top      []ValueCount `json:"top,omitempty"`
+}
+
+// ValueCount 一个取值及其出现次数。
+type ValueCount struct {
+	Value string `json:"value"`
+	Count int64  `json:"count"`
+}
+
+// FieldStats 计算图层各字段的统计信息。
+func (s *Store) FieldStats(ctx context.Context, l *models.Layer) ([]FieldStat, error) {
+	if !validIdent(l.TableName) {
+		return nil, fmt.Errorf("invalid table name")
+	}
+	out := make([]FieldStat, 0, len(l.Fields))
+	for _, f := range l.Fields {
+		col := quoteIdent(strings.ToLower(f.Name))
+		st := FieldStat{Field: f.Name, Type: string(f.Type)}
+		row := s.pool.QueryRow(ctx, fmt.Sprintf(
+			`SELECT count(*), count(*) FILTER (WHERE %s IS NULL), count(DISTINCT %s) FROM %s`,
+			col, col, quoteIdent(l.TableName)))
+		if err := row.Scan(&st.Count, &st.Nulls, &st.Distinct); err != nil {
+			return nil, err
+		}
+		switch f.Type {
+		case models.FieldInteger, models.FieldBigInt, models.FieldDouble, models.FieldTimestamp, models.FieldDate:
+			var minv, maxv any
+			_ = s.pool.QueryRow(ctx, fmt.Sprintf(
+				`SELECT min(%s), max(%s) FROM %s`, col, col, quoteIdent(l.TableName))).Scan(&minv, &maxv)
+			st.Min, st.Max = minv, maxv
+		}
+		if st.Distinct <= 50 {
+			rows, err := s.pool.Query(ctx, fmt.Sprintf(
+				`SELECT %s::text, count(*) FROM %s WHERE %s IS NOT NULL GROUP BY 1 ORDER BY 2 DESC LIMIT 20`,
+				col, quoteIdent(l.TableName), col))
+			if err == nil {
+				for rows.Next() {
+					var vc ValueCount
+					if err := rows.Scan(&vc.Value, &vc.Count); err == nil {
+						st.Top = append(st.Top, vc)
+					}
+				}
+				rows.Close()
+			}
+		}
+		out = append(out, st)
+	}
+	return out, nil
+}
+
+// AnalyzeRequest 描述一次空间分析（不落库，返回 GeoJSON）。
+type AnalyzeRequest struct {
+	Op        string  // buffer / centroid / convexhull / simplify / envelope
+	Distance  float64 // buffer 距离（图层坐标系单位）
+	Tolerance float64 // simplify 容差（图层坐标系单位）
+	OutSRID   int
+	Limit     int
+}
+
+// AnalyzeFeatures 对查询结果逐要素做空间运算，返回 GeoJSON FeatureCollection。
+func (s *Store) AnalyzeFeatures(ctx context.Context, l *models.Layer, q FeatureQuery, req AnalyzeRequest) (json.RawMessage, int64, error) {
+	if !validIdent(l.TableName) {
+		return nil, 0, fmt.Errorf("invalid table name")
+	}
+	if req.OutSRID == 0 {
+		req.OutSRID = 4326
+	}
+	if req.Limit <= 0 || req.Limit > 100000 {
+		req.Limit = 10000
+	}
+	var expr string
+	switch req.Op {
+	case "buffer":
+		expr = fmt.Sprintf("ST_Buffer(t.geom, %g)", req.Distance)
+	case "centroid":
+		expr = "ST_Centroid(t.geom)"
+	case "convexhull":
+		expr = "ST_ConvexHull(t.geom)"
+	case "envelope":
+		expr = "ST_Envelope(t.geom)"
+	case "simplify":
+		expr = fmt.Sprintf("ST_SimplifyPreserveTopology(t.geom, %g)", req.Tolerance)
+	default:
+		return nil, 0, fmt.Errorf("不支持的空间分析操作 %q", req.Op)
+	}
+
+	cw := &whereBuilder{}
+	if err := buildWhere(l, &q, cw); err != nil {
+		return nil, 0, err
+	}
+	countSQL := "SELECT count(*) FROM " + quoteIdent(l.TableName) + " t"
+	if len(cw.conds) > 0 {
+		countSQL += " WHERE " + strings.Join(cw.conds, " AND ")
+	}
+	var total int64
+	if err := s.pool.QueryRow(ctx, countSQL, cw.args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+
+	w := &whereBuilder{}
+	if err := buildWhere(l, &q, w); err != nil {
+		return nil, 0, err
+	}
+	limitPh := w.arg(req.Limit)
+	sql := fmt.Sprintf(`
+		SELECT COALESCE(jsonb_agg(jsonb_build_object(
+			'type','Feature',
+			'id', sub.fid,
+			'geometry', (ST_AsGeoJSON(ST_Transform(sub.g, %d))::jsonb - 'crs'),
+			'properties', sub.props
+		) ORDER BY sub.fid), '[]'::jsonb)
+		FROM (
+			SELECT t.fid, %s AS g, %s AS props
+			FROM %s t
+			%s
+			ORDER BY t.fid
+			LIMIT %s
+		) sub`,
+		req.OutSRID, expr, propsObjectExpr(l), quoteIdent(l.TableName), whereClause(w.conds), limitPh)
+
+	var features json.RawMessage
+	if err := s.pool.QueryRow(ctx, sql, w.args...).Scan(&features); err != nil {
+		return nil, 0, err
+	}
+	out, err := json.Marshal(map[string]any{
+		"type":     "FeatureCollection",
+		"crs":      map[string]any{"type": "name", "properties": map[string]any{"name": fmt.Sprintf("EPSG:%d", req.OutSRID)}},
+		"features": features,
+		"total":    total,
+	})
+	return out, total, err
 }

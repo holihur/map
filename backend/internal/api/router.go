@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -17,6 +18,7 @@ import (
 	"mapserver/internal/cache"
 	"mapserver/internal/config"
 	"mapserver/internal/metrics"
+	"mapserver/internal/models"
 	"mapserver/internal/store"
 	"mapserver/internal/web"
 )
@@ -52,6 +54,15 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 		versions: newTokenVersionCache(30 * time.Second),
 	}
 	h.auth.SetVersionCheck(h.userTokenVersion)
+	h.auth.SetAPIKeyResolver(func(ctx context.Context, key string) (*models.User, *auth.APIKeyIdentity, bool) {
+		k, err := st.FindAPIKey(ctx, key)
+		if err != nil {
+			return nil, nil, false
+		}
+		go st.TouchAPIKey(context.Background(), k.ID)
+		return &models.User{Username: "api-key:" + k.Name, Role: k.Role},
+			&auth.APIKeyIdentity{ID: k.ID, Role: k.Role, LayerName: k.LayerName}, true
+	})
 	h.registerMetrics()
 	if h.web.Enabled() {
 		log.Info("已启用前端静态托管", "source", h.web.Source())
@@ -83,12 +94,13 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.CORSOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "If-None-Match"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "If-None-Match", "X-API-Key"},
 		ExposedHeaders:   []string{"Content-Length", "ETag"},
 		AllowCredentials: false,
 		MaxAge:           300,
 	}))
 	r.Use(h.auth.Middleware)
+	r.Use(h.auditMiddleware)
 	r.Use(h.rateLimit)
 	r.Use(securityHeaders)
 	r.Use(h.metricsMiddleware)
@@ -101,10 +113,30 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 	r.Get("/api/crs/{srid}", h.getCRS)
 	r.Get("/api/tilematrixsets", h.listTileMatrixSets)
 	r.Get("/api/export", h.exportAll)
+	r.Get("/api/search", h.search)
 	r.Get("/api/wms", h.wms)
 	r.Get("/api/wfs", h.wfs)
 	r.With(editorOnly).Post("/api/wfs", h.wfsTransaction)
 	r.With(adminOnly).Post("/api/cache/purge", h.purgeCache)
+
+	// 分享地图（GET 公开）
+	r.Route("/api/maps", func(r chi.Router) {
+		r.With(h.auth.RequireAuth).Get("/", h.listMaps)
+		r.With(h.auth.RequireAuth).Post("/", h.createMap)
+		r.Get("/{token}", h.getMap)
+		r.With(h.auth.RequireAuth).Put("/{token}", h.updateMap)
+		r.With(h.auth.RequireAuth).Delete("/{token}", h.deleteMap)
+	})
+
+	// API Key / 审计（管理员）
+	r.Route("/api/apikeys", func(r chi.Router) {
+		r.Use(adminOnly)
+		r.Get("/", h.listAPIKeys)
+		r.Post("/", h.createAPIKey)
+		r.Post("/{id}/revoke", h.revokeAPIKey)
+		r.Delete("/{id}", h.deleteAPIKey)
+	})
+	r.With(adminOnly).Get("/api/audit", h.listAuditLogs)
 
 	// 认证
 	r.Post("/api/auth/login", h.login)
@@ -114,27 +146,33 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 
 	// 用户管理
 	r.Route("/api/users", func(r chi.Router) {
-		r.Use(adminOnly)
-		r.Get("/", h.listUsers)
-		r.Post("/", h.createUser)
-		r.Put("/{id}", h.updateUser)
-		r.Delete("/{id}", h.deleteUser)
+		r.With(editorOnly).Get("/", h.listUsers)
+		r.With(adminOnly).Post("/", h.createUser)
+		r.With(adminOnly).Put("/{id}", h.updateUser)
+		r.With(adminOnly).Delete("/{id}", h.deleteUser)
 	})
 
 	r.Route("/api/layers", func(r chi.Router) {
 		r.Get("/", h.listLayers)
 		r.With(editorOnly).Post("/", h.createLayer)
+		r.With(editorOnly).Post("/import", h.importNewLayer)
+		r.With(editorOnly).Post("/reorder", h.reorderLayers)
 		r.Route("/{layer}", func(r chi.Router) {
 			r.Get("/", h.getLayer)
 			r.With(editorOnly).Patch("/", h.updateLayer)
 			r.With(editorOnly).Put("/", h.updateLayer)
 			r.With(adminOnly).Delete("/", h.deleteLayer)
 			r.Get("/bounds", h.layerBounds)
+			r.Get("/stats", h.fieldStats)
+			r.Get("/access", h.getLayerAccess)
+			r.With(editorOnly).Put("/access", h.setLayerAccess)
 			r.With(editorOnly).Post("/transform", h.transformLayer)
 			r.Get("/export", h.exportLayer)
 			r.With(editorOnly).Post("/import", h.importLayer)
 			r.Get("/features", h.listFeatures)
 			r.With(editorOnly).Post("/features", h.createFeatures)
+			r.With(editorOnly).Post("/features/batch", h.batchFeatures)
+			r.Post("/analyze", h.analyzeFeatures)
 			r.Get("/features/{fid}", h.getFeature)
 			r.With(editorOnly).Patch("/features/{fid}", h.updateFeature)
 			r.With(editorOnly).Put("/features/{fid}", h.updateFeature)

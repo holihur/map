@@ -34,6 +34,8 @@ export interface Layer {
   bounds?: [number, number, number, number];
   style: LayerStyle;
   metadata: Record<string, unknown>;
+  sortOrder: number;
+  visibility: "public" | "private";
   featureCount: number;
   createdAt: string;
   updatedAt: string;
@@ -50,6 +52,8 @@ export interface CreateLayerInput {
   maxZoom?: number;
   style?: LayerStyle;
   metadata?: Record<string, unknown>;
+  sortOrder?: number;
+  visibility?: "public" | "private";
 }
 
 export interface GeoJSONGeometry {
@@ -92,6 +96,8 @@ export interface Capabilities {
 export interface FeatureQuery {
   bbox?: string;
   bboxSrid?: number;
+  ids?: number[];
+  q?: string;
   limit?: number;
   offset?: number;
   outSrid?: number;
@@ -118,4 +124,89 @@ export interface TileMatrixSet {
   topLeftOrigin: boolean;
   tileUrl: string;
   maxZoom: number;
+}
+
+export type BasemapId = "solid" | "osm" | "carto-light" | "carto-dark" | "satellite";
+
+export interface LayerViewState {
+  visible: boolean;
+  opacity: number;
+  /** 可选的临时样式覆盖（不写回后端）。 */
+  styleOverride?: LayerStyle;
+}
+
+export interface MapWorkspace {
+  version: 1;
+  name?: string;
+  basemap: BasemapId;
+  backgroundColor: string;
+  center: [number, number];
+  zoom: number;
+  bearing: number;
+  pitch: number;
+  layers: Record<string, LayerViewState>;
+  order: string[];
+  popupFields?: Record<string, string[]>;
+}
+
+export interface SharedMap {
+  id: number;
+  token: string;
+  name: string;
+  state: MapWorkspace;
+  createdBy: number;
+  isPublic: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface APIKey {
+  id: number;
+  name: string;
+  prefix: string;
+  role: string;
+  layerName?: string;
+  revoked: boolean;
+  createdAt: string;
+  lastUsedAt?: string;
+}
+
+export interface AuditLog {
+  id: number;
+  userId: number;
+  username: string;
+  role: string;
+  method: string;
+  path: string;
+  status: number;
+  layer: string;
+  ip: string;
+  detail: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface FieldStat {
+  field: string;
+  type: string;
+  count: number;
+  nulls: number;
+  distinct: number;
+  min?: unknown;
+  max?: unknown;
+  top?: Array<{ value: string; count: number }>;
+}
+
+export interface SearchResponse {
+  layers: Array<{
+    name: string;
+    title: string;
+    geometryType: string;
+    bounds?: [number, number, number, number];
+    featureCount: number;
+  }>;
+  features: Array<{
+    layer: string;
+    layerTitle: string;
+    feature: GeoJSONFeature;
+  }>;
 }

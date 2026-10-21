@@ -29,7 +29,7 @@ func (h *Handlers) vectorTile(ctx context.Context, layer *models.Layer, grid til
 	}
 
 	env := grid.Envelope(z, x, y)
-	data, err := h.store.TileMVT(ctx, layer, extent, grid.SRID, env)
+	data, err := h.store.TileMVT(ctx, layer, extent, grid.SRID, z, h.cfg.TileMaxFeatures, h.cfg.TileSimplify, env)
 	if err != nil {
 		return nil, false, err
 	}

@@ -43,6 +43,8 @@ type Layer struct {
 	Style        json.RawMessage `json:"style"`
 	StyleName    string          `json:"styleName,omitempty"`
 	Metadata     json.RawMessage `json:"metadata"`
+	SortOrder    int             `json:"sortOrder"`
+	Visibility   string          `json:"visibility"` // public / private
 	FeatureCount int64           `json:"featureCount"`
 	CreatedAt    time.Time       `json:"createdAt"`
 	UpdatedAt    time.Time       `json:"updatedAt"`
@@ -60,6 +62,8 @@ type CreateLayerRequest struct {
 	MaxZoom      *int            `json:"maxZoom"`
 	Style        json.RawMessage `json:"style"`
 	Metadata     json.RawMessage `json:"metadata"`
+	SortOrder    *int            `json:"sortOrder"`
+	Visibility   *string         `json:"visibility"`
 }
 
 // UpdateLayerRequest 更新图层的请求体（字段可选）。
@@ -71,6 +75,8 @@ type UpdateLayerRequest struct {
 	Style       json.RawMessage `json:"style"`
 	StyleName   *string         `json:"styleName"`
 	Metadata    json.RawMessage `json:"metadata"`
+	SortOrder   *int            `json:"sortOrder"`
+	Visibility  *string         `json:"visibility"`
 }
 
 // Style 一套 MapLibre Style 规范样式，或一份 SLD 文档。
@@ -125,6 +131,77 @@ type CRS struct {
 // TransformLayerRequest 转换图层坐标系请求。
 type TransformLayerRequest struct {
 	SRID int `json:"srid"`
+}
+
+// ReorderLayersRequest 按名称数组重排图层顺序。
+type ReorderLayersRequest struct {
+	Names []string `json:"names"`
+}
+
+// LayerAccess 一条图层授权。
+type LayerAccess struct {
+	UserID   int64  `json:"userId"`
+	Username string `json:"username"`
+	Level    string `json:"level"` // read / write
+}
+
+// LayerAccessSettings 图层的发布设置。
+type LayerAccessSettings struct {
+	Visibility string        `json:"visibility"`
+	Access     []LayerAccess `json:"access"`
+}
+
+// APIKey 第三方访问密钥（明文只在创建时返回一次）。
+type APIKey struct {
+	ID         int64      `json:"id"`
+	Name       string     `json:"name"`
+	Prefix     string     `json:"prefix"`
+	Role       string     `json:"role"`
+	LayerName  string     `json:"layerName,omitempty"`
+	Revoked    bool       `json:"revoked"`
+	CreatedAt  time.Time  `json:"createdAt"`
+	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+}
+
+// CreateAPIKeyRequest 创建 API Key。
+type CreateAPIKeyRequest struct {
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	LayerName string `json:"layerName"`
+}
+
+// AuditLog 一次写操作审计。
+type AuditLog struct {
+	ID        int64           `json:"id"`
+	UserID    int64           `json:"userId"`
+	Username  string          `json:"username"`
+	Role      string          `json:"role"`
+	Method    string          `json:"method"`
+	Path      string          `json:"path"`
+	Status    int             `json:"status"`
+	Layer     string          `json:"layer"`
+	IP        string          `json:"ip"`
+	Detail    json.RawMessage `json:"detail"`
+	CreatedAt time.Time       `json:"createdAt"`
+}
+
+// MapState 保存/分享的地图状态。
+type MapState struct {
+	ID        int64           `json:"id"`
+	Token     string          `json:"token"`
+	Name      string          `json:"name"`
+	State     json.RawMessage `json:"state"`
+	CreatedBy int64           `json:"createdBy"`
+	IsPublic  bool            `json:"isPublic"`
+	CreatedAt time.Time       `json:"createdAt"`
+	UpdatedAt time.Time       `json:"updatedAt"`
+}
+
+// SaveMapRequest 保存地图状态。
+type SaveMapRequest struct {
+	Name     string          `json:"name"`
+	State    json.RawMessage `json:"state"`
+	IsPublic *bool           `json:"isPublic"`
 }
 
 // CreateStyleRequest 创建样式请求体。

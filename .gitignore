@@ -25,3 +25,6 @@ backend/internal/web/dist/*
 .idea/
 .vscode/
 *.log
+
+# 本地运行时数据（瓦片缓存等）
+data/

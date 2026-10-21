@@ -1,6 +1,19 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { ChevronLeft, ChevronRight, Download, Loader2, Plus, RefreshCw, Trash2, Upload } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Download,
+  Filter,
+  Loader2,
+  MapPin,
+  Plus,
+  RefreshCw,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -33,6 +46,8 @@ import {
 } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
 import {
+  analyzeFeatures,
+  batchFeatures,
   createFeatures,
   deleteFeature,
   exportAllUrl,
@@ -43,25 +58,51 @@ import {
   updateFeature,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import type { GeoJSONFeature, Layer } from "@/types";
+import type { FeatureQuery, GeoJSONFeature, Layer } from "@/types";
 
 const PAGE_SIZE = 25;
+const PAGE_SIZES = [25, 50, 100];
+
+const OPERATORS = [
+  { value: "eq", label: "等于" },
+  { value: "neq", label: "不等于" },
+  { value: "gt", label: "大于" },
+  { value: "gte", label: "大于等于" },
+  { value: "lt", label: "小于" },
+  { value: "lte", label: "小于等于" },
+  { value: "like", label: "包含" },
+  { value: "isnull", label: "为空" },
+  { value: "notnull", label: "不为空" },
+];
+
+interface FilterRow {
+  id: number;
+  field: string;
+  op: string;
+  value: string;
+}
+
+let filterSeq = 1;
 
 export function DataPage() {
   const { can } = useAuth();
   const editable = can("editor");
+  const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const [layers, setLayers] = useState<Layer[]>([]);
   const [features, setFeatures] = useState<GeoJSONFeature[]>([]);
   const [total, setTotal] = useState(0);
   const [offset, setOffset] = useState(0);
+  const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [loading, setLoading] = useState(false);
 
-  const [filterField, setFilterField] = useState<string>("");
-  const [filterValue, setFilterValue] = useState("");
-  const [appliedFilter, setAppliedFilter] = useState<{ field: string; value: string } | null>(
-    null
-  );
+  const [filters, setFilters] = useState<FilterRow[]>([]);
+  const [textQuery, setTextQuery] = useState("");
+  const [appliedFilters, setAppliedFilters] = useState<FilterRow[]>([]);
+  const [appliedQuery, setAppliedQuery] = useState("");
+  const [orderBy, setOrderBy] = useState("");
+  const [order, setOrder] = useState<"asc" | "desc">("asc");
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
   const [addOpen, setAddOpen] = useState(false);
   const [addText, setAddText] = useState("");
@@ -69,12 +110,22 @@ export function DataPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importSrid, setImportSrid] = useState(4326);
+  const [importMapping, setImportMapping] = useState("");
   const [importing, setImporting] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [editing, setEditing] = useState<GeoJSONFeature | null>(null);
   const [editText, setEditText] = useState("");
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchField, setBatchField] = useState("");
+  const [batchValue, setBatchValue] = useState("");
+  const [analyzeOpen, setAnalyzeOpen] = useState(false);
+  const [analyzeOp, setAnalyzeOp] = useState<"buffer" | "centroid" | "convexhull" | "simplify" | "envelope">("buffer");
+  const [analyzeDistance, setAnalyzeDistance] = useState(0.01);
+  const [analyzeTolerance, setAnalyzeTolerance] = useState(0.001);
+  const [analyzing, setAnalyzing] = useState(false);
 
   const layerName = params.get("layer") ?? "";
+  const bbox = params.get("bbox") ?? "";
   const layer = useMemo(
     () => layers.find((l) => l.name === layerName) ?? null,
     [layers, layerName]
@@ -86,7 +137,7 @@ export function DataPage() {
         const data = await listLayers();
         setLayers(data);
         if (!params.get("layer") && data.length > 0) {
-          setParams({ layer: data[0].name }, { replace: true });
+          setParams({ ...Object.fromEntries(params), layer: data[0].name }, { replace: true });
         }
       } catch (err) {
         toast.error((err as Error).message);
@@ -95,25 +146,46 @@ export function DataPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const filterMap = useMemo(() => {
+    const out: Record<string, string> = {};
+    for (const f of appliedFilters) {
+      if (!f.field || f.op === "isnull" || f.op === "notnull") continue;
+      if (!f.value && f.op !== "like") continue;
+      out[f.op === "eq" ? f.field : `${f.field}.${f.op}`] = f.value;
+    }
+    for (const f of appliedFilters) {
+      if ((f.op === "isnull" || f.op === "notnull") && f.field) {
+        out[`${f.field}.${f.op}`] = "1";
+      }
+    }
+    return out;
+  }, [appliedFilters]);
+
   const loadFeatures = useCallback(async () => {
     if (!layerName) return;
     setLoading(true);
     try {
-      const filters: Record<string, string> = {};
-      if (appliedFilter) filters[appliedFilter.field] = appliedFilter.value;
-      const data = await listFeatures(layerName, {
-        limit: PAGE_SIZE,
+      const query: FeatureQuery = {
+        limit: pageSize,
         offset,
-        filters,
-      });
+        filters: filterMap,
+      };
+      if (appliedQuery) query.q = appliedQuery;
+      if (bbox) query.bbox = bbox;
+      if (orderBy) {
+        query.orderBy = orderBy;
+        query.order = order;
+      }
+      const data = await listFeatures(layerName, query);
       setFeatures(data.features ?? []);
       setTotal(data.total ?? 0);
+      setSelectedIds(new Set());
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [layerName, offset, appliedFilter]);
+  }, [layerName, offset, pageSize, filterMap, appliedQuery, bbox, orderBy, order]);
 
   useEffect(() => {
     void loadFeatures();
@@ -121,18 +193,32 @@ export function DataPage() {
 
   useEffect(() => {
     setOffset(0);
-    setAppliedFilter(null);
-    setFilterField("");
-    setFilterValue("");
+    setAppliedFilters([]);
+    setAppliedQuery("");
+    setFilters([]);
+    setTextQuery("");
+    setOrderBy("");
+    setSelectedIds(new Set());
+    setBatchField("");
   }, [layerName]);
 
   const applyFilter = () => {
-    if (!filterField || !filterValue) {
-      setAppliedFilter(null);
-    } else {
-      setAppliedFilter({ field: filterField, value: filterValue });
-    }
+    setAppliedFilters(filters.filter((f) => f.field));
+    setAppliedQuery(textQuery);
     setOffset(0);
+  };
+
+  const clearFilter = () => {
+    setFilters([]);
+    setTextQuery("");
+    setAppliedFilters([]);
+    setAppliedQuery("");
+    setOffset(0);
+    if (bbox) {
+      const next = Object.fromEntries(params);
+      delete next.bbox;
+      setParams(next, { replace: true });
+    }
   };
 
   const remove = async (f: GeoJSONFeature) => {
@@ -142,6 +228,39 @@ export function DataPage() {
     try {
       await deleteFeature(layer.name, fid);
       toast.success("要素已删除");
+      void loadFeatures();
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  };
+
+  const batchDelete = async () => {
+    if (!layer || selectedIds.size === 0) return;
+    if (!window.confirm(`删除选中的 ${selectedIds.size} 个要素？`)) return;
+    try {
+      const n = await batchFeatures(layer.name, {
+        action: "delete",
+        ids: [...selectedIds],
+      });
+      toast.success(`已删除 ${n} 个要素`);
+      setSelectedIds(new Set());
+      void loadFeatures();
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  };
+
+  const batchUpdate = async () => {
+    if (!layer || selectedIds.size === 0 || !batchField) return;
+    try {
+      const n = await batchFeatures(layer.name, {
+        action: "update",
+        ids: [...selectedIds],
+        properties: { [batchField]: batchValue },
+      });
+      toast.success(`已更新 ${n} 个要素`);
+      setBatchOpen(false);
+      setBatchValue("");
       void loadFeatures();
     } catch (err) {
       toast.error((err as Error).message);
@@ -166,8 +285,18 @@ export function DataPage() {
     if (!layer || !importFile) return;
     setImporting(true);
     try {
-      const res = await importLayer(layer.name, importFile, importSrid);
+      let mapping: Record<string, string> | undefined;
+      if (importMapping.trim()) {
+        try {
+          mapping = JSON.parse(importMapping) as Record<string, string>;
+        } catch {
+          toast.error("字段映射必须是 JSON 对象，例如 {\"src\":\"dest\"}");
+          return;
+        }
+      }
+      const res = await importLayer(layer.name, importFile, importSrid, mapping);
       toast.success(`已导入 ${res.imported} 个要素（${res.format}）`);
+      if (res.failed) toast.warning(`${res.failed} 行失败`);
       setImportOpen(false);
       setImportFile(null);
       void loadFeatures();
@@ -196,20 +325,62 @@ export function DataPage() {
     }
   };
 
-  const page = Math.floor(offset / PAGE_SIZE) + 1;
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const runAnalyze = async () => {
+    if (!layer) return;
+    setAnalyzing(true);
+    try {
+      const bboxArr = bbox ? (bbox.split(",").map(Number) as [number, number, number, number]) : undefined;
+      const data = await analyzeFeatures(layer.name, {
+        op: analyzeOp,
+        distance: analyzeDistance,
+        tolerance: analyzeTolerance,
+        ids: selectedIds.size ? [...selectedIds] : undefined,
+        filters: selectedIds.size ? undefined : filterMap,
+        bbox: selectedIds.size ? undefined : bboxArr,
+        outSrid: 4326,
+        limit: 5000,
+      });
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/geo+json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${layer.name}-${analyzeOp}.geojson`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast.success("分析结果已下载");
+      setAnalyzeOpen(false);
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
+
+  const toggleSelect = (id: number) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const allSelected = features.length > 0 && features.every((f) => selectedIds.has(Number(f.id)));
+
+  const page = Math.floor(offset / pageSize) + 1;
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
 
   return (
     <div className="h-full overflow-auto p-4 sm:p-6">
-      <div className="mx-auto max-w-6xl space-y-6">
+      <div className="mx-auto max-w-7xl space-y-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold tracking-tight">数据浏览</h1>
             <p className="text-sm text-muted-foreground">
-              以 GeoJSON 方式查询与编辑图层要素。
+              查询、筛选、批量编辑与导出图层要素；可与地图双向定位。
             </p>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <Select
               value={layerName}
               onValueChange={(v) => setParams({ layer: v }, { replace: true })}
@@ -235,6 +406,9 @@ export function DataPage() {
             <Button disabled={!layer} variant="outline" onClick={() => setExportOpen(true)}>
               <Download className="h-4 w-4" /> 导出
             </Button>
+            <Button disabled={!layer} variant="outline" onClick={() => setAnalyzeOpen(true)}>
+              空间分析
+            </Button>
             <Button disabled={!layer || !editable} variant="outline" onClick={() => setImportOpen(true)}>
               <Upload className="h-4 w-4" /> 导入
             </Button>
@@ -246,106 +420,289 @@ export function DataPage() {
 
         {layer && (
           <Card>
-            <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0">
-              <CardTitle className="flex items-center gap-2 text-base">
-                {layer.title || layer.name}
-                <Badge variant="secondary">{layer.geometryType}</Badge>
-                <span className="text-sm font-normal text-muted-foreground">
-                  共 {total} 个要素
-                </span>
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                <Select value={filterField} onValueChange={setFilterField}>
-                  <SelectTrigger className="w-40">
-                    <SelectValue placeholder="过滤字段" />
+            <CardHeader className="space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <CardTitle className="flex items-center gap-2 text-base">
+                  {layer.title || layer.name}
+                  <Badge variant="secondary">{layer.geometryType}</Badge>
+                  <span className="text-sm font-normal text-muted-foreground">
+                    共 {total} 个要素
+                  </span>
+                  {bbox && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      框选 {bbox}
+                    </Badge>
+                  )}
+                </CardTitle>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative">
+                    <Search className="pointer-events-none absolute left-2 top-2.5 h-4 w-4 text-muted-foreground" />
+                    <Input
+                      className="w-48 pl-8"
+                      placeholder="全文搜索属性…"
+                      value={textQuery}
+                      onChange={(e) => setTextQuery(e.target.value)}
+                      onKeyDown={(e) => e.key === "Enter" && applyFilter()}
+                    />
+                  </div>
+                  <Select
+                    value={orderBy || "__fid__"}
+                    onValueChange={(v) => setOrderBy(v === "__fid__" ? "" : v)}
+                  >
+                    <SelectTrigger className="w-36">
+                      <SelectValue placeholder="排序" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__fid__">按 fid</SelectItem>
+                      {layer.fields.map((f) => (
+                        <SelectItem key={f.name} value={f.name}>
+                          {f.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setOrder((o) => (o === "asc" ? "desc" : "asc"))}
+                  >
+                    {order === "asc" ? "升序" : "降序"}
+                  </Button>
+                </div>
+              </div>
+
+              <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+                <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+                  <Filter className="h-3.5 w-3.5" /> 筛选条件（可组合）
+                </div>
+                {filters.map((row) => (
+                  <div key={row.id} className="flex flex-wrap items-center gap-2">
+                    <Select
+                      value={row.field}
+                      onValueChange={(v) =>
+                        setFilters((rows) =>
+                          rows.map((r) => (r.id === row.id ? { ...r, field: v } : r))
+                        )
+                      }
+                    >
+                      <SelectTrigger className="w-36">
+                        <SelectValue placeholder="字段" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {layer.fields.map((f) => (
+                          <SelectItem key={f.name} value={f.name}>
+                            {f.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Select
+                      value={row.op}
+                      onValueChange={(v) =>
+                        setFilters((rows) =>
+                          rows.map((r) => (r.id === row.id ? { ...r, op: v } : r))
+                        )
+                      }
+                    >
+                      <SelectTrigger className="w-32">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {OPERATORS.map((o) => (
+                          <SelectItem key={o.value} value={o.value}>
+                            {o.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    <Input
+                      className="w-44"
+                      placeholder="值"
+                      disabled={row.op === "isnull" || row.op === "notnull"}
+                      value={row.value}
+                      onChange={(e) =>
+                        setFilters((rows) =>
+                          rows.map((r) => (r.id === row.id ? { ...r, value: e.target.value } : r))
+                        )
+                      }
+                      onKeyDown={(e) => e.key === "Enter" && applyFilter()}
+                    />
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={() => setFilters((rows) => rows.filter((r) => r.id !== row.id))}
+                    >
+                      <X className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() =>
+                      setFilters((rows) => [
+                        ...rows,
+                        {
+                          id: filterSeq++,
+                          field: layer.fields[0]?.name ?? "",
+                          op: "eq",
+                          value: "",
+                        },
+                      ])
+                    }
+                  >
+                    <Plus className="h-3.5 w-3.5" /> 添加条件
+                  </Button>
+                  <Button size="sm" onClick={applyFilter}>
+                    应用筛选
+                  </Button>
+                  {(appliedFilters.length > 0 || appliedQuery || bbox) && (
+                    <Button size="sm" variant="ghost" onClick={clearFilter}>
+                      清除
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </CardHeader>
+
+            {selectedIds.size > 0 && editable && (
+              <div className="flex flex-wrap items-center gap-2 border-y bg-amber-50 px-4 py-2 text-sm dark:bg-amber-950/30">
+                <span className="font-medium">已选 {selectedIds.size} 项</span>
+                <Button size="sm" variant="outline" onClick={() => setBatchOpen(true)}>
+                  批量修改字段
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => void batchDelete()}>
+                  <Trash2 className="h-4 w-4 text-destructive" /> 批量删除
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => setAnalyzeOpen(true)}>
+                  分析选中要素
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setSelectedIds(new Set())}>
+                  取消选择
+                </Button>
+              </div>
+            )}
+
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-10">
+                        <input
+                          type="checkbox"
+                          checked={allSelected}
+                          onChange={(e) =>
+                            setSelectedIds(
+                              e.target.checked
+                                ? new Set(features.map((f) => Number(f.id)))
+                                : new Set()
+                            )
+                          }
+                        />
+                      </TableHead>
+                      <TableHead className="w-20">fid</TableHead>
+                      {layer.fields.map((f) => (
+                        <TableHead key={f.name}>{f.name}</TableHead>
+                      ))}
+                      <TableHead className="w-40 text-right">操作</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {features.map((f) => (
+                      <TableRow key={String(f.id)} className="hover:bg-accent/50">
+                        <TableCell>
+                          <input
+                            type="checkbox"
+                            checked={selectedIds.has(Number(f.id))}
+                            onChange={() => toggleSelect(Number(f.id))}
+                          />
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{String(f.id)}</TableCell>
+                        {layer.fields.map((field) => (
+                          <TableCell key={field.name} className="max-w-[220px] truncate">
+                            {formatValue(f.properties?.[field.name])}
+                          </TableCell>
+                        ))}
+                        <TableCell className="text-right">
+                          <div className="flex justify-end gap-1">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              title="在地图中查看"
+                              onClick={() =>
+                                navigate(
+                                  `/map?layer=${encodeURIComponent(layer.name)}&fid=${f.id}`
+                                )
+                              }
+                            >
+                              <MapPin className="h-4 w-4" />
+                            </Button>
+                            {editable && (
+                              <>
+                                <Button variant="ghost" size="sm" onClick={() => openEdit(f)}>
+                                  编辑
+                                </Button>
+                                <Button variant="ghost" size="icon" onClick={() => void remove(f)}>
+                                  <Trash2 className="h-4 w-4 text-destructive" />
+                                </Button>
+                              </>
+                            )}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                    {features.length === 0 && !loading && (
+                      <TableRow>
+                        <TableCell
+                          colSpan={layer.fields.length + 3}
+                          className="py-10 text-center text-sm text-muted-foreground"
+                        >
+                          没有符合条件的要素
+                        </TableCell>
+                      </TableRow>
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+            <div className="flex flex-wrap items-center justify-between gap-2 border-t px-4 py-3 text-sm">
+              <span className="text-muted-foreground">
+                第 {page} / {pageCount} 页 · 每页
+                <Select
+                  value={String(pageSize)}
+                  onValueChange={(v) => {
+                    setPageSize(Number(v));
+                    setOffset(0);
+                  }}
+                >
+                  <SelectTrigger className="ml-1 inline-flex h-7 w-20">
+                    <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {layer.fields.map((f) => (
-                      <SelectItem key={f.name} value={f.name}>
-                        {f.name}
+                    {PAGE_SIZES.map((s) => (
+                      <SelectItem key={s} value={String(s)}>
+                        {s}
                       </SelectItem>
                     ))}
                   </SelectContent>
                 </Select>
-                <Input
-                  className="w-44"
-                  placeholder="值（支持模糊）"
-                  value={filterValue}
-                  onChange={(e) => setFilterValue(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && applyFilter()}
-                />
-                <Button variant="outline" onClick={applyFilter}>
-                  过滤
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent className="p-0">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-20">fid</TableHead>
-                    {layer.fields.map((f) => (
-                      <TableHead key={f.name}>{f.name}</TableHead>
-                    ))}
-                    <TableHead className="w-32 text-right">操作</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {features.map((f) => (
-                    <TableRow key={String(f.id)}>
-                      <TableCell className="font-mono text-xs">{String(f.id)}</TableCell>
-                      {layer.fields.map((field) => (
-                        <TableCell key={field.name} className="max-w-[220px] truncate">
-                          {formatValue(f.properties?.[field.name])}
-                        </TableCell>
-                      ))}
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-1">
-                          {editable && (
-                            <>
-                              <Button variant="ghost" size="sm" onClick={() => openEdit(f)}>
-                                编辑
-                              </Button>
-                              <Button variant="ghost" size="icon" onClick={() => void remove(f)}>
-                                <Trash2 className="h-4 w-4 text-destructive" />
-                              </Button>
-                            </>
-                          )}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                  {features.length === 0 && !loading && (
-                    <TableRow>
-                      <TableCell
-                        colSpan={layer.fields.length + 2}
-                        className="py-10 text-center text-sm text-muted-foreground"
-                      >
-                        没有符合条件的要素
-                      </TableCell>
-                    </TableRow>
-                  )}
-                </TableBody>
-              </Table>
-            </CardContent>
-            <div className="flex items-center justify-between border-t px-4 py-3 text-sm">
-              <span className="text-muted-foreground">
-                第 {page} / {pageCount} 页
               </span>
               <div className="flex gap-2">
                 <Button
                   variant="outline"
                   size="sm"
                   disabled={offset === 0}
-                  onClick={() => setOffset((o) => Math.max(0, o - PAGE_SIZE))}
+                  onClick={() => setOffset((o) => Math.max(0, o - pageSize))}
                 >
                   <ChevronLeft className="h-4 w-4" /> 上一页
                 </Button>
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={offset + PAGE_SIZE >= total}
-                  onClick={() => setOffset((o) => o + PAGE_SIZE)}
+                  disabled={offset + pageSize >= total}
+                  onClick={() => setOffset((o) => o + pageSize)}
                 >
                   下一页 <ChevronRight className="h-4 w-4" />
                 </Button>
@@ -397,7 +754,7 @@ export function DataPage() {
         </DialogContent>
       </Dialog>
 
-      {/* 导出 */}
+      {/* 导出（带当前筛选条件） */}
       <Dialog open={exportOpen} onOpenChange={setExportOpen}>
         <DialogContent className="max-w-md">
           <DialogHeader>
@@ -405,7 +762,7 @@ export function DataPage() {
           </DialogHeader>
           <div className="grid gap-2 py-1">
             <p className="text-sm text-muted-foreground">
-              选择导出格式（新窗口下载；坐标系为 EPSG:4326）。
+              导出会应用当前筛选条件{bbox ? "与框选范围" : ""}（坐标系为 EPSG:4326）。
             </p>
             {[
               { fmt: "geojson", label: "GeoJSON (.geojson)" },
@@ -416,7 +773,15 @@ export function DataPage() {
               <a
                 key={o.fmt}
                 className="flex items-center justify-between rounded-md border px-3 py-2 text-sm hover:bg-accent"
-                href={layer ? exportUrl(layer.name, o.fmt) : "#"}
+                href={
+                  layer
+                    ? exportUrl(layer.name, o.fmt, {
+                        filters: filterMap,
+                        bbox: bbox || undefined,
+                        query: appliedQuery || undefined,
+                      })
+                    : "#"
+                }
                 onClick={() => setExportOpen(false)}
               >
                 {o.label}
@@ -463,6 +828,16 @@ export function DataPage() {
               <Label>文件坐标系 (SRID)</Label>
               <CRSInput value={importSrid} onChange={setImportSrid} />
             </div>
+            <div className="grid gap-1.5">
+              <Label>字段映射（可选，JSON）</Label>
+              <Textarea
+                rows={2}
+                className="font-mono text-xs"
+                placeholder={'{"源字段":"目标字段"}'}
+                value={importMapping}
+                onChange={(e) => setImportMapping(e.target.value)}
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setImportOpen(false)}>
@@ -471,6 +846,110 @@ export function DataPage() {
             <Button onClick={submitImport} disabled={!importFile || importing}>
               {importing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
               导入
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 批量修改 */}
+      <Dialog open={batchOpen} onOpenChange={setBatchOpen}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle>批量修改 {selectedIds.size} 个要素</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-3 py-1">
+            <div className="grid gap-1.5">
+              <Label>字段</Label>
+              <Select value={batchField} onValueChange={setBatchField}>
+                <SelectTrigger>
+                  <SelectValue placeholder="选择字段" />
+                </SelectTrigger>
+                <SelectContent>
+                  {layer?.fields.map((f) => (
+                    <SelectItem key={f.name} value={f.name}>
+                      {f.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid gap-1.5">
+              <Label>新值</Label>
+              <Input value={batchValue} onChange={(e) => setBatchValue(e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setBatchOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void batchUpdate()} disabled={!batchField}>
+              更新
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 空间分析 */}
+      <Dialog open={analyzeOpen} onOpenChange={setAnalyzeOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>空间分析</DialogTitle>
+          </DialogHeader>
+          <div className="grid gap-3 py-1">
+            <p className="text-xs text-muted-foreground">
+              {selectedIds.size > 0
+                ? `对选中的 ${selectedIds.size} 个要素进行分析`
+                : "对当前筛选 / 框选结果进行分析"}
+              ，结果为 GeoJSON 文件（EPSG:4326，不写入数据库）。
+            </p>
+            <div className="grid gap-1.5">
+              <Label>操作</Label>
+              <Select
+                value={analyzeOp}
+                onValueChange={(v) => setAnalyzeOp(v as typeof analyzeOp)}
+              >
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="buffer">缓冲区（Buffer）</SelectItem>
+                  <SelectItem value="centroid">质心（Centroid）</SelectItem>
+                  <SelectItem value="convexhull">凸包（Convex Hull）</SelectItem>
+                  <SelectItem value="envelope">外包矩形（Envelope）</SelectItem>
+                  <SelectItem value="simplify">简化（Simplify）</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {analyzeOp === "buffer" && (
+              <div className="grid gap-1.5">
+                <Label>缓冲距离（图层坐标系单位）</Label>
+                <Input
+                  type="number"
+                  step="0.001"
+                  value={analyzeDistance}
+                  onChange={(e) => setAnalyzeDistance(Number(e.target.value))}
+                />
+              </div>
+            )}
+            {analyzeOp === "simplify" && (
+              <div className="grid gap-1.5">
+                <Label>简化容差（图层坐标系单位）</Label>
+                <Input
+                  type="number"
+                  step="0.0001"
+                  value={analyzeTolerance}
+                  onChange={(e) => setAnalyzeTolerance(Number(e.target.value))}
+                />
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setAnalyzeOpen(false)}>
+              取消
+            </Button>
+            <Button onClick={() => void runAnalyze()} disabled={analyzing}>
+              {analyzing ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+              生成并下载
             </Button>
           </DialogFooter>
         </DialogContent>

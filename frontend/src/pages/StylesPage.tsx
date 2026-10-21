@@ -20,6 +20,17 @@ import { createStyle, deleteStyle, listStyles, updateStyle, uploadSLD } from "@/
 import { useAuth } from "@/lib/auth";
 import type { MapStyle } from "@/types";
 
+function firstColor(style: Record<string, unknown>): string | undefined {
+  const layers = (style as any)?.layers;
+  if (!Array.isArray(layers)) return undefined;
+  for (const l of layers) {
+    const pt = l?.paint ?? {};
+    const c = pt["fill-color"] ?? pt["line-color"] ?? pt["circle-color"] ?? pt["background-color"];
+    if (typeof c === "string" && c.startsWith("#")) return c;
+  }
+  return undefined;
+}
+
 const DEFAULT_STYLE = {
   version: 8,
   sources: {},
@@ -182,6 +193,23 @@ export function StylesPage() {
                 </CardTitle>
               </CardHeader>
               <CardContent className="space-y-3">
+                <div className="flex items-center gap-2 rounded-md border bg-muted/30 px-3 py-2 text-xs">
+                  <span
+                    className="inline-block h-4 w-8 rounded border"
+                    style={{
+                      backgroundColor:
+                        firstColor(s.style) ??
+                        (s.style as any)?.layers?.[0]?.paint?.["background-color"] ??
+                        "#f8fafc",
+                    }}
+                  />
+                  <span className="text-muted-foreground">图例预览</span>
+                  <span className="ml-auto font-mono text-[10px] text-muted-foreground">
+                    {Array.isArray((s.style as any)?.layers)
+                      ? `${(s.style as any).layers.length} 个图层`
+                      : "Style JSON"}
+                  </span>
+                </div>
                 <pre className="max-h-40 overflow-auto rounded-md bg-muted p-3 text-[11px] leading-relaxed">
                   {JSON.stringify(s.style, null, 2)}
                 </pre>

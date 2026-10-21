@@ -15,14 +15,15 @@ import (
 const layerCols = `id, name, title, description, geometry_type, srid, table_name,
 	fields, min_zoom, max_zoom,
 	ST_XMin(bounds), ST_YMin(bounds), ST_XMax(bounds), ST_YMax(bounds),
-	style, style_name, metadata, created_at, updated_at`
+	style, style_name, metadata, sort_order, COALESCE(visibility, 'public'), created_at, updated_at`
 
 func scanLayer(row pgx.Row, l *models.Layer) error {
 	var fieldsRaw, styleRaw, metaRaw []byte
 	var minx, miny, maxx, maxy *float64
 	var styleName *string
 	err := row.Scan(&l.ID, &l.Name, &l.Title, &l.Description, &l.GeometryType, &l.SRID, &l.TableName,
-		&fieldsRaw, &l.MinZoom, &l.MaxZoom, &minx, &miny, &maxx, &maxy, &styleRaw, &styleName, &metaRaw, &l.CreatedAt, &l.UpdatedAt)
+		&fieldsRaw, &l.MinZoom, &l.MaxZoom, &minx, &miny, &maxx, &maxy, &styleRaw, &styleName, &metaRaw,
+		&l.SortOrder, &l.Visibility, &l.CreatedAt, &l.UpdatedAt)
 	if err != nil {
 		return err
 	}
@@ -46,7 +47,7 @@ func scanLayer(row pgx.Row, l *models.Layer) error {
 
 // ListLayers 返回全部图层（含要素数量，使用单次批量统计避免 N+1）。
 func (s *Store) ListLayers(ctx context.Context) ([]models.Layer, error) {
-	rows, err := s.pool.Query(ctx, `SELECT `+layerCols+` FROM layers ORDER BY name`)
+	rows, err := s.pool.Query(ctx, `SELECT `+layerCols+` FROM layers ORDER BY sort_order, name`)
 	if err != nil {
 		return nil, err
 	}
@@ -207,6 +208,14 @@ func (s *Store) CreateLayer(ctx context.Context, req models.CreateLayerRequest) 
 	if len(meta) == 0 {
 		meta = json.RawMessage(`{}`)
 	}
+	sortOrder := 0
+	if req.SortOrder != nil {
+		sortOrder = *req.SortOrder
+	}
+	visibility := "public"
+	if req.Visibility != nil && *req.Visibility != "" {
+		visibility = normalizeVisibility(*req.Visibility)
+	}
 
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -237,10 +246,10 @@ func (s *Store) CreateLayer(ctx context.Context, req models.CreateLayerRequest) 
 
 	fieldsJSON, _ := json.Marshal(req.Fields)
 	row := tx.QueryRow(ctx, `
-		INSERT INTO layers (name, title, description, geometry_type, srid, table_name, fields, min_zoom, max_zoom, style, metadata)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+		INSERT INTO layers (name, title, description, geometry_type, srid, table_name, fields, min_zoom, max_zoom, style, metadata, sort_order, visibility)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		RETURNING `+layerCols,
-		name, req.Title, req.Description, geometryType, srid, table, fieldsJSON, minZoom, maxZoom, style, meta)
+		name, req.Title, req.Description, geometryType, srid, table, fieldsJSON, minZoom, maxZoom, style, meta, sortOrder, visibility)
 
 	var l models.Layer
 	if err := scanLayer(row, &l); err != nil {
@@ -284,6 +293,12 @@ func (s *Store) UpdateLayer(ctx context.Context, id int64, req models.UpdateLaye
 	}
 	if len(req.Metadata) > 0 {
 		add("metadata = $%d", []byte(req.Metadata))
+	}
+	if req.SortOrder != nil {
+		add("sort_order = $%d", *req.SortOrder)
+	}
+	if req.Visibility != nil && *req.Visibility != "" {
+		add("visibility = $%d", normalizeVisibility(*req.Visibility))
 	}
 	args = append(args, id)
 	row := s.pool.QueryRow(ctx,
@@ -360,4 +375,98 @@ func (s *Store) DeleteLayer(ctx context.Context, id int64) error {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+// normalizeVisibility 只允许 public / private。
+func normalizeVisibility(v string) string {
+	if strings.EqualFold(strings.TrimSpace(v), "private") {
+		return "private"
+	}
+	return "public"
+}
+
+// ReorderLayers 按 names 的顺序重写 sort_order；未列出的图层排在后面。
+func (s *Store) ReorderLayers(ctx context.Context, names []string) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	for i, name := range names {
+		if _, err := tx.Exec(ctx,
+			`UPDATE layers SET sort_order=$1, updated_at=now() WHERE name=$2`, i, name); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// GetLayerAccess 返回图层的发布设置。
+func (s *Store) GetLayerAccess(ctx context.Context, layerID int64) (*models.LayerAccessSettings, error) {
+	var visibility string
+	if err := s.pool.QueryRow(ctx,
+		`SELECT COALESCE(visibility,'public') FROM layers WHERE id=$1`, layerID).Scan(&visibility); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT a.user_id, u.username, a.level
+		FROM layer_access a JOIN users u ON u.id=a.user_id
+		WHERE a.layer_id=$1 ORDER BY u.username`, layerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := &models.LayerAccessSettings{Visibility: visibility, Access: []models.LayerAccess{}}
+	for rows.Next() {
+		var a models.LayerAccess
+		if err := rows.Scan(&a.UserID, &a.Username, &a.Level); err != nil {
+			return nil, err
+		}
+		out.Access = append(out.Access, a)
+	}
+	return out, rows.Err()
+}
+
+// SetLayerAccess 覆盖式更新图层可见性与授权。
+func (s *Store) SetLayerAccess(ctx context.Context, layerID int64, visibility string, access []models.LayerAccess) error {
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx,
+		`UPDATE layers SET visibility=$1, updated_at=now() WHERE id=$2`,
+		normalizeVisibility(visibility), layerID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM layer_access WHERE layer_id=$1`, layerID); err != nil {
+		return err
+	}
+	for _, a := range access {
+		level := "read"
+		if strings.EqualFold(a.Level, "write") {
+			level = "write"
+		}
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO layer_access (layer_id,user_id,level) VALUES ($1,$2,$3)
+			 ON CONFLICT (layer_id,user_id) DO UPDATE SET level=EXCLUDED.level`,
+			layerID, a.UserID, level); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+// LayerAccessLevel 返回用户对图层的最高权限（"" 表示无权限）。
+func (s *Store) LayerAccessLevel(ctx context.Context, layerID, userID int64) (string, error) {
+	var level string
+	err := s.pool.QueryRow(ctx,
+		`SELECT level FROM layer_access WHERE layer_id=$1 AND user_id=$2`, layerID, userID).Scan(&level)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return level, err
 }

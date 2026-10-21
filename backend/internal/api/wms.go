@@ -36,7 +36,7 @@ func (h *Handlers) wms(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) wmsCapabilities(w http.ResponseWriter, r *http.Request) {
 	base := requestBaseURL(r)
-	layers, err := h.store.ListLayers(r.Context())
+	layers, err := h.readableLayers(r.Context())
 	if err != nil {
 		wmsException(w, "NoApplicableCode", err.Error())
 		return
@@ -185,6 +185,10 @@ func (h *Handlers) wmsGetMap(w http.ResponseWriter, r *http.Request) {
 			wmsException(w, "LayerNotDefined", "图层不存在: "+name)
 			return
 		}
+		if !h.layerReadAllowed(r.Context(), layer) {
+			wmsException(w, "LayerNotDefined", "没有该图层的访问权限")
+			return
+		}
 
 		rgba := layerColor(layer)
 		req := store.RenderRequest{BBox: bbox, OutSRID: srid, Width: width, Height: height}
@@ -294,6 +298,10 @@ func (h *Handlers) wmsGetFeatureInfo(w http.ResponseWriter, r *http.Request) {
 		layer, err := h.store.GetLayerByName(r.Context(), name)
 		if err != nil {
 			wmsException(w, "LayerNotDefined", "图层不存在: "+name)
+			return
+		}
+		if !h.layerReadAllowed(r.Context(), layer) {
+			wmsException(w, "LayerNotDefined", "没有该图层的访问权限")
 			return
 		}
 		raw, err := h.store.QueryPoint(r.Context(), layer, x, y, srid, tol, 4326, 20)

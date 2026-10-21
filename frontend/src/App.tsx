@@ -7,6 +7,8 @@ import { CapabilitiesPage } from "@/pages/CapabilitiesPage";
 import { DataPage } from "@/pages/DataPage";
 import { LayersPage } from "@/pages/LayersPage";
 import { LoginPage } from "@/pages/LoginPage";
+import { SharedMapPage } from "@/pages/SharedMapPage";
+import { PublishPage } from "@/pages/PublishPage";
 import { MapPage } from "@/pages/MapPage";
 import { StylesPage } from "@/pages/StylesPage";
 import { UsersPage } from "@/pages/UsersPage";
@@ -20,6 +22,7 @@ export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/share/:token" element={<SharedMapPage />} />
       <Route
         element={
           <RequireAuth>
@@ -47,6 +50,7 @@ export function App() {
         <Route path="/data" element={<DataPage />} />
         <Route path="/styles" element={<StylesPage />} />
         <Route path="/capabilities" element={<CapabilitiesPage />} />
+        <Route path="/publish" element={<PublishPage />} />
         <Route path="/users" element={<UsersPage />} />
         <Route path="*" element={<Navigate to="/map" replace />} />
       </Route>

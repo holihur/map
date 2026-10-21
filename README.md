@@ -27,8 +27,18 @@
 | WMTS | `GET /api/wmts` 提供 GetCapabilities 与 GetTile（KVP + RESTful，PNG / MVT） |
 | 投影视图 | 前端 OpenLayers + proj4 加载 `WorldCRS84Quad` 矢量瓦片，并客户端重投影到 4326 / 3857 / 3413 等 |
 | 移动端适配 | 响应式布局：移动端顶栏 + 底部导航 + 抽屉面板；触摸友好的绘制工具栏 |
+| 底图与工作区 | OSM / CARTO 浅色 / CARTO 深色 / Esri 卫星影像 / 纯色底图；视角、底图、图层顺序、可见性、透明度自动保存 |
+| 图层控制 | 拖拽/上下移动排序、透明度滑块、缩放范围、标注字段、点击弹窗字段 |
+| 可视化样式 | 图层样式编辑器：颜色、透明度、线宽、点半径、按字段分级着色、热力图、图例预览 |
+| 地图分享 | 一键保存当前工作区并生成 `/share/{token}` 公开/私有链接，无需登录查看 |
 | 地图绘制 | 在浏览器地图上绘制点 / 线 / 面并直接写入图层（MapLibre 事件驱动的轻量绘制工具） |
-| 要素编辑 | 点击地图要素查看属性，编辑 GeoJSON 或删除 |
+| 要素编辑 | 点击地图要素查看属性、拖动移动、节点编辑、吸附、撤销/重做、编辑 GeoJSON 或删除 |
+| 数据工作台 | 多条件筛选、全文搜索、排序、分页、框选联动、批量删除/批量改字段、按筛选导出 |
+| 空间分析 | 缓冲区 / 质心 / 凸包 / 外包矩形 / 几何简化，结果导出 GeoJSON |
+| 搜索定位 | 图层名、标题、描述与文本属性全文搜索，结果一键定位 |
+| 上传建层 | 拖拽 GeoJSON / CSV / Shapefile / GeoPackage，自动推断几何类型与字段类型，预览后一次建层导入 |
+| 发布治理 | 私有图层 + 用户级读/写授权、第三方 API Key、写操作审计日志 |
+| 瓦片性能 | 按缩放级别简化几何、单瓦片要素上限、低缩放级别自动收紧，避免大数据拖垮瓦片 |
 | 鉴权与权限 | JWT 登录 + RBAC（admin / editor / viewer），写操作受保护 |
 | 瓦片缓存 | 内存 LRU + TTL 缓存，图层要素变更时按图层失效 |
 | 元数据缓存 | 图层 / 样式 / 能力文档缓存 + `ETag` / `304` 协商缓存 |
@@ -108,6 +118,8 @@ make serve        # 构建前端 → 内嵌进 Go → 启动，浏览器访问 h
 | `TOKEN_TTL_HOURS` | `72` | 登录 Token 有效期 |
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | `30` / `60` | 按 IP 限流（0 禁用） |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 首次启动自动创建的管理员 |
+| `TILE_MAX_FEATURES` | `5000` | 单个矢量瓦片最多编码要素数（低缩放自动收紧） |
+| `TILE_SIMPLIFY` | `true` | 是否按瓦片分辨率简化几何 |
 | `TILE_CACHE_ENTRIES` | `2048` | 瓦片缓存条目数（0 禁用） |
 | `TILE_CACHE_TTL_SECONDS` | `300` | 瓦片缓存有效期 |
 | `META_CACHE_TTL_SECONDS` | `30` | 元数据缓存有效期 |
@@ -129,6 +141,13 @@ make serve        # 构建前端 → 内嵌进 Go → 启动，浏览器访问 h
 ```bash
 make docker-db   # docker compose up -d db（需自行拉取 postgis 镜像）
 ```
+
+## 发布与鉴权
+
+- **私有图层**：`PUT /api/layers/{name}/access` 设置 `visibility=private` 并授权用户（`read` / `write`）；匿名请求将返回 403。
+- **API Key**：管理员在「发布」页创建，第三方请求使用 `X-API-Key: ms_...` 或 `?api_key=ms_...`；可限定到单个图层。
+- **分享地图**：地图页「分享」生成 `/share/{token}`，保存视角、底图、图层顺序/可见性/透明度；公开链接无需登录。
+- **审计**：所有写操作（POST/PUT/PATCH/DELETE）自动记录用户、路径、状态、IP，管理员在「发布 → 审计日志」查看。
 
 ## API
 
@@ -161,8 +180,21 @@ make docker-db   # docker compose up -d db（需自行拉取 postgis 镜像）
 | GET | `/api/wmts/rest/{layer}/{style}/{tms}/{z}/{y}/{x}.{ext}` | 公开 | WMTS RESTful（ext = png / mvt） |
 | GET | `/api/wfs` | 公开 | WFS 2.0.0：GetCapabilities / DescribeFeatureType / GetFeature |
 | POST | `/api/wfs` | editor | WFS-T 事务（Insert / Update / Delete） |
-| GET | `/api/layers/{name}/export` | 公开 | 导出（`format=geojson|csv|shapefile|gpkg`） |
-| POST | `/api/layers/{name}/import` | editor | 导入（multipart `file`，可带 `srid`、gpkg 的 `table`） |
+| GET | `/api/layers/{name}/export` | 公开 | 导出（`format=geojson|csv|shapefile|gpkg`，支持当前筛选/bbox/q） |
+| POST | `/api/layers/{name}/import` | editor | 导入（multipart `file`，可带 `srid`、gpkg 的 `table`、字段 `mapping`） |
+| POST | `/api/layers/import` | editor | 上传文件自动推断 schema 建层并导入；`preview=true` 仅预览 |
+| POST | `/api/layers/reorder` | editor | 按 `{names:[...]}` 重排图层顺序 |
+| GET/PUT | `/api/layers/{name}/access` | 读公开 / 写 editor | 图层发布设置：public/private 与用户授权 |
+| GET | `/api/layers/{name}/stats` | 公开 | 字段统计（min/max/distinct/top values） |
+| POST | `/api/layers/{name}/features/batch` | editor | 按 ids/筛选批量删除或更新属性 |
+| POST | `/api/layers/{name}/analyze` | 公开 | 空间分析：buffer / centroid / convexhull / envelope / simplify |
+| GET | `/api/search?q=` | 公开 | 图层与文本属性搜索（可选 `layer`、`limit`） |
+| POST/GET | `/api/maps` | 登录 | 保存地图工作区 / 列出自己的分享地图 |
+| GET | `/api/maps/{token}` | 公开 | 读取公开分享地图（私有需登录且为创建者/管理员） |
+| PUT/DELETE | `/api/maps/{token}` | 登录 | 更新 / 删除分享地图 |
+| GET/POST | `/api/apikeys` | admin | 列出 / 创建第三方 API Key（明文仅返回一次） |
+| POST/DELETE | `/api/apikeys/{id}` | admin | 吊销 / 删除 API Key |
+| GET | `/api/audit` | admin | 写操作审计日志（`limit`、`layer`） |
 | GET | `/api/export?format=gpkg` | 公开 | 全部图层导出为单个 GeoPackage |
 | GET | `/metrics` | 公开 | Prometheus 指标 |
 | POST | `/api/styles/sld?name=` | editor | 上传 SLD 文档到样式库 |

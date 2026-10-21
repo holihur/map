@@ -11,11 +11,13 @@ import (
 
 // Config 保存服务运行所需配置。
 type Config struct {
-	Addr        string
-	DatabaseURL string
-	CORSOrigins []string
-	MaxFeatures int // 单次查询返回的最大要素数
-	TileMaxZoom int
+	Addr            string
+	DatabaseURL     string
+	CORSOrigins     []string
+	MaxFeatures     int // 单次查询返回的最大要素数
+	TileMaxZoom     int
+	TileMaxFeatures int  // 单个矢量瓦片最多要素数（低缩放级别保护）
+	TileSimplify    bool // 是否按瓦片分辨率简化几何
 
 	// 鉴权
 	JWTSecret     string
@@ -46,11 +48,13 @@ type Config struct {
 func Load() Config {
 	loadDotEnv()
 	return Config{
-		Addr:        env("HTTP_ADDR", ":8420"),
-		DatabaseURL: env("DATABASE_URL", "postgres://map:map@localhost:5432/mapserver?sslmode=disable"),
-		CORSOrigins: split(env("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")),
-		MaxFeatures: envInt("MAX_FEATURES", 100000),
-		TileMaxZoom: envInt("TILE_MAX_ZOOM", 22),
+		Addr:            env("HTTP_ADDR", ":8420"),
+		DatabaseURL:     env("DATABASE_URL", "postgres://map:map@localhost:5432/mapserver?sslmode=disable"),
+		CORSOrigins:     split(env("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")),
+		MaxFeatures:     envInt("MAX_FEATURES", 100000),
+		TileMaxZoom:     envInt("TILE_MAX_ZOOM", 22),
+		TileMaxFeatures: envInt("TILE_MAX_FEATURES", 5000),
+		TileSimplify:    envBool("TILE_SIMPLIFY", true),
 
 		JWTSecret:      env("JWT_SECRET", "dev-secret-change-me"),
 		TokenTTL:       time.Duration(envInt("TOKEN_TTL_HOURS", 72)) * time.Hour,
@@ -102,6 +106,15 @@ func envFloat(key string, def float64) float64 {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		if f, err := strconv.ParseFloat(v, 64); err == nil {
 			return f
+		}
+	}
+	return def
+}
+
+func envBool(key string, def bool) bool {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			return b
 		}
 	}
 	return def

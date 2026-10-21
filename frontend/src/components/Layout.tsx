@@ -9,6 +9,7 @@ import {
   Map as MapIcon,
   Menu,
   Palette,
+  Share2,
   Users,
   Workflow,
 } from "lucide-react";
@@ -39,6 +40,7 @@ const NAV: NavItem[] = [
   { to: "/data", label: "数据", icon: Database },
   { to: "/styles", label: "样式", icon: Palette },
   { to: "/capabilities", label: "能力", icon: FileJson },
+  { to: "/publish", label: "发布", icon: Share2, adminOnly: true },
   { to: "/users", label: "用户", icon: Users, adminOnly: true },
 ];
 

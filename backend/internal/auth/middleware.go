@@ -14,6 +14,8 @@ type Authenticator struct {
 	// versionCheck 可选：校验 Token 中的版本号是否仍然有效（用于吊销）。
 	// 返回 (版本, 是否已知)；未知时不做校验。
 	versionCheck func(ctx context.Context, userID int64) (int, bool)
+	// apiKeyResolver 可选：将 X-API-Key 解析为调用方身份。
+	apiKeyResolver APIKeyResolver
 }
 
 // NewAuthenticator 构造 Authenticator。
@@ -30,6 +32,15 @@ func (a *Authenticator) SetVersionCheck(fn func(ctx context.Context, userID int6
 // 无 token 或 token 非法时不会中断请求，由 RequireAuth 决定是否拒绝。
 func (a *Authenticator) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// API Key 优先于 JWT：适用于第三方只读消费。
+		if key := apiKeyFromRequest(r); key != "" && a.apiKeyResolver != nil {
+			if user, ident, ok := a.apiKeyResolver(r.Context(), key); ok {
+				r = r.WithContext(WithUser(r.Context(), user))
+				r = r.WithContext(WithAPIKey(r.Context(), ident))
+				next.ServeHTTP(w, r)
+				return
+			}
+		}
 		token := bearerToken(r)
 		if token != "" {
 			if claims, err := Parse(a.secret, token); err == nil {

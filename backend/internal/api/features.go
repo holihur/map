@@ -27,68 +27,14 @@ func (h *Handlers) listFeatures(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	q := store.FeatureQuery{
-		Limit:     h.cfg.MaxFeatures,
-		OutSRID:   4326,
-		BBoxSRID:  4326,
-		OrderBy:   r.URL.Query().Get("orderBy"),
-		OrderDesc: r.URL.Query().Get("order") == "desc",
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
+		return
 	}
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			q.Limit = n
-		}
+	q, err := h.parseFeatureQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
 	}
-	if v := r.URL.Query().Get("offset"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			q.Offset = n
-		}
-	}
-	if v := r.URL.Query().Get("outSrid"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			q.OutSRID = n
-		}
-	}
-	if v := r.URL.Query().Get("bboxSrid"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			q.BBoxSRID = n
-		}
-	}
-	if v := r.URL.Query().Get("simplify"); v != "" {
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			q.Simplify = f
-		}
-	}
-	if v := r.URL.Query().Get("bbox"); v != "" {
-		parts := strings.Split(v, ",")
-		if len(parts) != 4 {
-			writeError(w, http.StatusBadRequest, errString("bbox 需要 4 个逗号分隔的数字"))
-			return
-		}
-		var b [4]float64
-		for i, p := range parts {
-			f, err := strconv.ParseFloat(strings.TrimSpace(p), 64)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, errString("bbox 解析失败"))
-				return
-			}
-			b[i] = f
-		}
-		q.BBox = &b
-	}
-	// 属性过滤：f.<field> 或 f.<field>.<op>
-	for key, vals := range r.URL.Query() {
-		if !strings.HasPrefix(key, "f.") || len(vals) == 0 {
-			continue
-		}
-		rest := strings.TrimPrefix(key, "f.")
-		field, op := rest, "eq"
-		if idx := strings.LastIndex(rest, "."); idx > 0 {
-			field, op = rest[:idx], rest[idx+1:]
-		}
-		q.Filters = append(q.Filters, store.Filter{Field: field, Op: op, Value: vals[0]})
-	}
-
 	data, _, err := h.store.FeaturesGeoJSON(r.Context(), layer, q)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -99,9 +45,78 @@ func (h *Handlers) listFeatures(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(data)
 }
 
+// batchFeatures 批量删除 / 更新（按 ids 或过滤条件）。
+func (h *Handlers) batchFeatures(w http.ResponseWriter, r *http.Request) {
+	layer, ok := h.lookupLayer(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
+		return
+	}
+	var req struct {
+		Action     string            `json:"action"`
+		IDs        []int64           `json:"ids"`
+		Filters    map[string]string `json:"filters"`
+		BBox       *[4]float64       `json:"bbox"`
+		Properties map[string]any    `json:"properties"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	q := store.FeatureQuery{IDs: req.IDs, BBox: req.BBox, BBoxSRID: 4326}
+	for k, v := range req.Filters {
+		field, op := k, "eq"
+		if idx := strings.LastIndex(k, "."); idx > 0 {
+			field, op = k[:idx], k[idx+1:]
+		}
+		q.Filters = append(q.Filters, store.Filter{Field: field, Op: op, Value: v})
+	}
+	var (
+		affected int64
+		err      error
+	)
+	switch strings.ToLower(req.Action) {
+	case "delete":
+		affected, err = h.store.DeleteFeaturesWhere(r.Context(), layer, q)
+	case "update":
+		affected, err = h.store.UpdateFeaturesWhere(r.Context(), layer, q, req.Properties)
+	default:
+		writeError(w, http.StatusBadRequest, errString("action 必须是 delete 或 update"))
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	h.invalidateLayer(layer.Name)
+	writeJSON(w, http.StatusOK, map[string]any{"affected": affected})
+}
+
+// fieldStats 返回图层字段统计（供样式分级 / 数据概览）。
+func (h *Handlers) fieldStats(w http.ResponseWriter, r *http.Request) {
+	layer, ok := h.lookupLayer(w, r)
+	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
+		return
+	}
+	stats, err := h.store.FieldStats(r.Context(), layer)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"stats": stats})
+}
+
 func (h *Handlers) getFeature(w http.ResponseWriter, r *http.Request) {
 	layer, ok := h.lookupLayer(w, r)
 	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
 		return
 	}
 	fid, err := strconv.ParseInt(chi.URLParam(r, "fid"), 10, 64)
@@ -127,6 +142,9 @@ func (h *Handlers) getFeature(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) createFeatures(w http.ResponseWriter, r *http.Request) {
 	layer, ok := h.lookupLayer(w, r)
 	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
 		return
 	}
 	var raw json.RawMessage
@@ -181,6 +199,9 @@ func (h *Handlers) updateFeature(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
+		return
+	}
 	fid, err := strconv.ParseInt(chi.URLParam(r, "fid"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, errString("fid 非法"))
@@ -210,6 +231,9 @@ func (h *Handlers) deleteFeature(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
+		return
+	}
 	fid, err := strconv.ParseInt(chi.URLParam(r, "fid"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, errString("fid 非法"))
@@ -231,4 +255,45 @@ func inputSRID(r *http.Request) int {
 		}
 	}
 	return 4326
+}
+
+// analyzeFeatures 对查询结果做空间分析并返回 GeoJSON（不写库）。
+func (h *Handlers) analyzeFeatures(w http.ResponseWriter, r *http.Request) {
+	layer, ok := h.lookupLayer(w, r)
+	if !ok {
+		return
+	}
+	var req struct {
+		Op        string            `json:"op"`
+		Distance  float64           `json:"distance"`
+		Tolerance float64           `json:"tolerance"`
+		IDs       []int64           `json:"ids"`
+		BBox      *[4]float64       `json:"bbox"`
+		Filters   map[string]string `json:"filters"`
+		OutSRID   int               `json:"outSrid"`
+		Limit     int               `json:"limit"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	q := store.FeatureQuery{IDs: req.IDs, BBox: req.BBox, BBoxSRID: 4326, OutSRID: req.OutSRID}
+	for k, v := range req.Filters {
+		field, op := k, "eq"
+		if idx := strings.LastIndex(k, "."); idx > 0 {
+			field, op = k[:idx], k[idx+1:]
+		}
+		q.Filters = append(q.Filters, store.Filter{Field: field, Op: op, Value: v})
+	}
+	data, total, err := h.store.AnalyzeFeatures(r.Context(), layer, q, store.AnalyzeRequest{
+		Op: req.Op, Distance: req.Distance, Tolerance: req.Tolerance,
+		OutSRID: req.OutSRID, Limit: req.Limit,
+	})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/geo+json")
+	w.Header().Set("X-Total-Count", strconv.FormatInt(total, 10))
+	_, _ = w.Write(data)
 }

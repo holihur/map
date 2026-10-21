@@ -76,6 +76,9 @@ func (h *Handlers) wfsInsert(r *http.Request, tx store.Tx, action fesNode, touch
 		if err != nil {
 			return count, fmt.Errorf("图层不存在: %s", layerName)
 		}
+		if !h.layerWriteAllowed(r.Context(), layer) {
+			return count, fmt.Errorf("没有图层 %s 的写入权限", layerName)
+		}
 		g, props := featureToGeomProps(layer, feature)
 		if _, err := h.store.InsertFeatureGeomTx(r.Context(), tx, layer, g, props); err != nil {
 			return count, err
@@ -143,6 +146,9 @@ func (h *Handlers) layerFromTypeName(r *http.Request, action fesNode) (*models.L
 	layer, err := h.store.GetLayerByName(r.Context(), typeName)
 	if err != nil {
 		return nil, fmt.Errorf("图层不存在: %s", typeName)
+	}
+	if !h.layerWriteAllowed(r.Context(), layer) {
+		return nil, fmt.Errorf("没有图层 %s 的写入权限", typeName)
 	}
 	return layer, nil
 }

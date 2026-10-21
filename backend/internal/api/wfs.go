@@ -29,7 +29,7 @@ func (h *Handlers) wfs(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handlers) wfsCapabilities(w http.ResponseWriter, r *http.Request) {
 	base := requestBaseURL(r)
-	layers, err := h.store.ListLayers(r.Context())
+	layers, err := h.readableLayers(r.Context())
 	if err != nil {
 		owsException(w, "NoApplicableCode", err.Error())
 		return
@@ -79,6 +79,10 @@ func (h *Handlers) wfsDescribeFeatureType(w http.ResponseWriter, r *http.Request
 	layer, err := h.store.GetLayerByName(r.Context(), name)
 	if err != nil {
 		owsException(w, "InvalidParameterValue", "图层不存在: "+name)
+		return
+	}
+	if !h.layerReadAllowed(r.Context(), layer) {
+		owsException(w, "PermissionDenied", "没有该图层的访问权限")
 		return
 	}
 
@@ -175,6 +179,10 @@ func (h *Handlers) wfsGetFeature(w http.ResponseWriter, r *http.Request) {
 	layer, err := h.store.GetLayerByName(r.Context(), typeNames[0])
 	if err != nil {
 		owsException(w, "InvalidParameterValue", "图层不存在: "+typeNames[0])
+		return
+	}
+	if !h.layerReadAllowed(r.Context(), layer) {
+		owsException(w, "PermissionDenied", "没有该图层的访问权限")
 		return
 	}
 

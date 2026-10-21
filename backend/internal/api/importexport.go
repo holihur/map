@@ -18,21 +18,21 @@ func (h *Handlers) exportLayer(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
+		return
+	}
 	formatName := strings.ToLower(r.URL.Query().Get("format"))
 	if formatName == "" {
 		formatName = "geojson"
 	}
-	outSRID := 4326
-	if v := r.URL.Query().Get("outSrid"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
-			outSRID = n
-		}
+	q, err := h.parseFeatureQuery(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
 	}
+	outSRID := q.OutSRID
 
-	raw, _, err := h.store.FeaturesGeoJSON(r.Context(), layer, store.FeatureQuery{
-		Limit:   h.cfg.MaxFeatures,
-		OutSRID: outSRID,
-	})
+	raw, _, err := h.store.FeaturesGeoJSON(r.Context(), layer, q)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -95,6 +95,9 @@ func (h *Handlers) exportLayer(w http.ResponseWriter, r *http.Request) {
 func (h *Handlers) importLayer(w http.ResponseWriter, r *http.Request) {
 	layer, ok := h.lookupLayer(w, r)
 	if !ok {
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodHead && !h.requireLayerWrite(w, r, layer) {
 		return
 	}
 	if err := r.ParseMultipartForm(64 << 20); err != nil {
@@ -177,8 +180,31 @@ func (h *Handlers) importLayer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 可选字段映射：{"源字段":"目标字段"}，键大小写不敏感。
+	mapping := map[string]string{}
+	if raw := r.FormValue("mapping"); raw != "" {
+		_ = json.Unmarshal([]byte(raw), &mapping)
+	}
+	for i := range features {
+		if len(mapping) > 0 {
+			props := make(map[string]any, len(features[i].Properties))
+			for k, v := range features[i].Properties {
+				dest := k
+				for src, target := range mapping {
+					if strings.EqualFold(src, k) {
+						dest = target
+						break
+					}
+				}
+				props[dest] = v
+			}
+			features[i].Properties = props
+		}
+	}
+
 	inserted := 0
-	for _, f := range features {
+	failed := make([]string, 0)
+	for i, f := range features {
 		g := store.GeomValue{WKT: f.WKT, WKB: f.WKB, SRID: srid}
 		if f.GeoJSON != nil {
 			if b, err := json.Marshal(f.GeoJSON); err == nil {
@@ -186,17 +212,23 @@ func (h *Handlers) importLayer(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if _, err := h.store.InsertFeatureGeom(r.Context(), layer, g, f.Properties); err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Errorf("第 %d 个要素导入失败: %w", inserted+1, err))
-			return
+			failed = append(failed, fmt.Sprintf("第 %d 行: %v", i+1, err))
+			continue
 		}
 		inserted++
 	}
 
 	h.invalidateLayer(layer.Name)
-	writeJSON(w, http.StatusCreated, map[string]any{
+	status := http.StatusCreated
+	if inserted == 0 {
+		status = http.StatusBadRequest
+	}
+	writeJSON(w, status, map[string]any{
 		"layer":    layer.Name,
 		"format":   formatName,
 		"imported": inserted,
+		"failed":   len(failed),
+		"errors":   failed,
 		"srid":     srid,
 	})
 }
@@ -212,7 +244,7 @@ func (h *Handlers) exportAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	layers, err := h.store.ListLayers(r.Context())
+	layers, err := h.readableLayers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
