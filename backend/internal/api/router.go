@@ -106,6 +106,8 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 	r.Use(h.metricsMiddleware)
 
 	r.Get("/health", h.health)
+	r.Get("/healthz", h.health)
+	r.Get("/readyz", h.ready)
 	r.Get("/metrics", h.metricsHandler)
 	r.Get("/api/capabilities", h.capabilities)
 	r.Get("/api/stats", h.stats)
@@ -114,6 +116,14 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 	r.Get("/api/tilematrixsets", h.listTileMatrixSets)
 	r.Get("/api/export", h.exportAll)
 	r.Get("/api/search", h.search)
+
+	// OGC API - Features（现代 REST/JSON，与 WFS 并存）
+	r.Get("/ogcapi", h.ogcLanding)
+	r.Get("/ogcapi/conformance", h.ogcConformance)
+	r.Get("/ogcapi/collections", h.ogcCollections)
+	r.Get("/ogcapi/collections/{name}", h.ogcCollection)
+	r.Get("/ogcapi/collections/{name}/items", h.ogcItems)
+	r.Get("/ogcapi/collections/{name}/items/{fid}", h.ogcItem)
 	r.Get("/api/wms", h.wms)
 	r.Get("/api/wfs", h.wfs)
 	r.With(editorOnly).Post("/api/wfs", h.wfsTransaction)
@@ -140,6 +150,7 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 
 	// 自然语言地图助手（BYOK，OpenAI 兼容 / ADK 风格工具调用）
 	r.With(h.auth.RequireAuth).Post("/api/ai/chat", h.aiChat)
+	r.With(h.auth.RequireAuth).Post("/api/ai/confirm", h.aiConfirm)
 
 	// 认证
 	r.Post("/api/auth/login", h.login)
@@ -232,6 +243,17 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 
 func (h *Handlers) health(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "service": "mapserver"})
+}
+
+// ready 就绪探针：检查数据库连接。
+func (h *Handlers) ready(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := h.store.Pool().Ping(ctx); err != nil {
+		writeError(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "service": "mapserver"})
 }
 
 // invalidateLayer 使指定图层的瓦片缓存（内存 + 磁盘）与全部元数据缓存失效。

@@ -1,0 +1,157 @@
+# MapServer Kubernetes 部署示例
+# 使用前请修改：镜像地址、域名、Secret 中的数据库连接串/JWT 密钥/管理员密码。
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mapserver
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mapserver-secrets
+  namespace: mapserver
+type: Opaque
+stringData:
+  DATABASE_URL: "postgres://map:map@postgres.example.com:5432/mapserver?sslmode=require"
+  JWT_SECRET: "please-change-this-to-a-long-random-secret"
+  ADMIN_PASSWORD: "please-change-this-admin-password"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mapserver-data
+  namespace: mapserver
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mapserver
+  namespace: mapserver
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: mapserver
+  template:
+    metadata:
+      labels:
+        app: mapserver
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: mapserver
+          image: ghcr.io/holihur/map:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8420
+          envFrom:
+            - secretRef:
+                name: mapserver-secrets
+          env:
+            - name: HTTP_ADDR
+              value: ":8420"
+            - name: APP_ENV
+              value: "production"
+            - name: TILE_CACHE_DIR
+              value: "/data/tile-cache"
+            - name: TILE_CACHE_MAX_MB
+              value: "2048"
+            - name: AI_BASE_URL
+              value: "https://api.deepseek.com/v1"
+            - name: AI_MODEL
+              value: "deepseek-chat"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mapserver-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mapserver
+  namespace: mapserver
+spec:
+  selector:
+    app: mapserver
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mapserver
+  namespace: mapserver
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "256m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: maps.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: mapserver
+                port:
+                  name: http
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: mapserver
+  namespace: mapserver
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: mapserver
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

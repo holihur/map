@@ -42,6 +42,8 @@
 | CORS 代理 | 第三方瓦片/GeoJSON 可经后端代理，自动替换 z/x/y、TMS 负 Y、WMS BBOX，避免浏览器跨域限制并缓存 |
 | 服务商预览 | `/providers` 页用 OpenLayers 预览全部服务商；百度 BD-09M 自定义投影在此视图中正确显示，并可一键添加到主地图（MapLibre 兼容项） |
 | 自然语言助手 | BYOK（用户自带模型 Key）+ Go 工具调用（ADK 风格）；支持查询、统计、空间分析、定位、打开数据表、批量改/删；默认 DeepSeek |
+| OGC API Features | 现代 REST/JSON 接口：`/ogcapi`、collections、items、分页/next/prev、bbox/bbox-crs、sortby、Content-Crs，与 WFS 并存 |
+| 生产就绪 | 健康/就绪探针、按用户/API Key 限流、TLS、HSTS、CSP、AI Base URL SSRF 防护、Docker/K8s、备份恢复、k6 压测脚本 |
 | 瓦片性能 | 按缩放级别简化几何、单瓦片要素上限、低缩放级别自动收紧，避免大数据拖垮瓦片 |
 | 鉴权与权限 | JWT 登录 + RBAC（admin / editor / viewer），写操作受保护 |
 | 瓦片缓存 | 内存 LRU + TTL 缓存，图层要素变更时按图层失效 |
@@ -125,6 +127,8 @@ make serve        # 构建前端 → 内嵌进 Go → 启动，浏览器访问 h
 | `AI_BASE_URL` | `https://api.deepseek.com/v1` | 默认模型服务（OpenAI 兼容） |
 | `AI_MODEL` | `deepseek-chat` | 默认模型 |
 | `AI_TIMEOUT_SECONDS` | `60` | 模型请求超时 |
+| `AI_ALLOW_PRIVATE` | `false` | 允许 AI Base URL 访问私有网段（本地 Ollama/内网网关） |
+| `TLS_CERT_FILE` / `TLS_KEY_FILE` | 空 | 直接启用 HTTPS（留空由反向代理终止 TLS） |
 | `TILE_MAX_FEATURES` | `5000` | 单个矢量瓦片最多编码要素数（低缩放自动收紧） |
 | `TILE_SIMPLIFY` | `true` | 是否按瓦片分辨率简化几何 |
 | `TILE_CACHE_ENTRIES` | `2048` | 瓦片缓存条目数（0 禁用） |
@@ -177,6 +181,7 @@ make docker-db   # docker compose up -d db（需自行拉取 postgis 镜像）
 - **工具（ADK 风格）**：`list_layers`、`query_features`、`layer_stats`、`search`、`analyze_features`、`map_action`、`update_features`、`delete_features`。
 - **地图动作**：定位图层、飞到 bbox、高亮要素、打开数据表、切换图层可见性。
 - **写操作保护**：默认关闭；只有用户在前端打开「允许写操作」且账号具备 editor 权限、图层写权限时，AI 才能批量修改/删除，且必须提供 ids 或 filters/bbox。
+- **二次确认**：默认开启。AI 只生成 5 分钟有效的 HMAC 签名待确认令牌，用户点击「确认执行」后由 `/api/ai/confirm` 真正执行，避免模型直接删改数据。
 - **密钥存储**：仅保存在浏览器 `localStorage`，随请求头 `X-AI-API-Key` 发送；服务端不持久化。
 
 示例：
@@ -191,6 +196,55 @@ curl -X POST localhost:8420/api/ai/chat \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"查找人口超过 1000 万的城市并定位到第一个"}],"allowWrite":false}'
 ```
+
+## 生产部署
+
+### Docker Compose
+
+```bash
+# 生产环境务必改掉 JWT_SECRET / ADMIN_PASSWORD
+JWT_SECRET="$(openssl rand -hex 32)" ADMIN_PASSWORD='your-strong-password' \
+  docker compose up -d --build
+```
+
+- 浏览器访问 `http://localhost:8420`
+- 数据库与瓦片缓存分别持久化到 `mapserver_pgdata` / `mapserver_data`
+- `APP_ENV=production` 时会拒绝默认 JWT 密钥
+
+### Kubernetes
+
+```bash
+kubectl apply -f deploy/k8s.yaml
+```
+
+包含 Deployment（2 副本、非 root、只读根文件系统）、Service、Ingress、PVC、HPA、健康探针。使用前修改镜像地址、域名与 Secret。
+
+### HTTPS
+
+- 反向代理（Nginx / Ingress）终止 TLS 时，设置 `X-Forwarded-Proto: https`，服务会自动返回 HSTS；
+- 或直接配置 `TLS_CERT_FILE` / `TLS_KEY_FILE` 由 Go 启动 HTTPS。
+
+### 备份 / 恢复
+
+```bash
+DATABASE_URL=... ./scripts/backup-db.sh     # 默认保留 14 天
+DATABASE_URL=... ./scripts/restore-db.sh ./backups/mapserver-xxxx.dump
+```
+
+### 冒烟与压测
+
+```bash
+./scripts/e2e-smoke.sh                       # API 端到端冒烟
+k6 run scripts/loadtest.js                   # 瓦片 + 要素 + OGC API 压测
+```
+
+### 安全加固清单
+
+- 修改默认 `JWT_SECRET`、`ADMIN_PASSWORD`，启用 HTTPS
+- 按用户/API Key 限流已内置；生产可在网关再加一层
+- AI BYOK 默认禁止访问私有网段；使用本地 Ollama 时设置 `AI_ALLOW_PRIVATE=true`
+- 第三方图层默认服务端代理，匿名响应不返回 `sourceUrl`，避免泄露 Token
+- 定期执行 `govulncheck ./...`（CI 已包含）并更新依赖
 
 ## API
 
@@ -243,6 +297,13 @@ curl -X POST localhost:8420/api/ai/chat \
 | GET | `/api/external-layers/{name}/tile/{z}/{x}/{y}` | 公开 | 代理第三方瓦片（解决 CORS，支持 `{-y}`、WMS BBOX） |
 | GET | `/api/external-layers/{name}/data` | 公开 | 代理第三方 GeoJSON 数据 |
 | POST | `/api/ai/chat` | 登录 | BYOK 自然语言地图助手（OpenAI 兼容 / DeepSeek，工具调用） |
+| GET | `/ogcapi` | 公开 | OGC API Features 落地页 |
+| GET | `/ogcapi/conformance` | 公开 | 一致性声明 |
+| GET | `/ogcapi/collections` | 公开 | 要素集合列表 |
+| GET | `/ogcapi/collections/{name}` | 公开 | 集合元数据 |
+| GET | `/ogcapi/collections/{name}/items` | 公开 | 要素查询（limit/offset/bbox/bbox-crs/sortby/q/f.*） |
+| GET | `/ogcapi/collections/{name}/items/{fid}` | 公开 | 单个要素 |
+| GET | `/healthz` / `/readyz` | 公开 | 存活 / 就绪探针（readyz 检查数据库） |
 | GET | `/api/export?format=gpkg` | 公开 | 全部图层导出为单个 GeoPackage |
 | GET | `/metrics` | 公开 | Prometheus 指标 |
 | POST | `/api/styles/sld?name=` | editor | 上传 SLD 文档到样式库 |

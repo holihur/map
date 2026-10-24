@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"net"
 	"net/http"
@@ -29,11 +30,14 @@ func securityHeaders(next http.Handler) http.Handler {
 			"default-src 'self'; "+
 				"script-src 'self'; "+
 				"style-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data: blob:; "+
+				"img-src 'self' data: blob: https:; "+
 				"font-src 'self' data:; "+
 				"worker-src 'self' blob:; "+
-				"connect-src 'self'; "+
+				"connect-src 'self' https:; "+
 				"object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+		if r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -100,6 +104,11 @@ func (h *Handlers) rateLimit(next http.Handler) http.Handler {
 			return
 		}
 		key := clientIP(r)
+		if user, ok := auth.UserFrom(r.Context()); ok && user.ID > 0 {
+			key = fmt.Sprintf("user:%d", user.ID)
+		} else if apiKey, ok := auth.APIKeyFrom(r.Context()); ok {
+			key = fmt.Sprintf("key:%d", apiKey.ID)
+		}
 		if !h.rate.allow(key) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, errString("请求过于频繁，请稍后重试"))

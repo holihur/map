@@ -3,9 +3,13 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -30,9 +34,10 @@ type aiMapContext struct {
 }
 
 type aiChatRequest struct {
-	Messages   []aiChatMessage `json:"messages"`
-	Context    *aiMapContext   `json:"context,omitempty"`
-	AllowWrite bool            `json:"allowWrite"`
+	Messages      []aiChatMessage `json:"messages"`
+	Context       *aiMapContext   `json:"context,omitempty"`
+	AllowWrite    bool            `json:"allowWrite"`
+	ConfirmWrites bool            `json:"confirmWrites"`
 }
 
 type aiStep struct {
@@ -60,12 +65,22 @@ type aiResult struct {
 	Total      int64           `json:"total"`
 }
 
+// aiPendingWrite 待确认的 AI 写操作（两步确认，防止模型直接删改数据）。
+type aiPendingWrite struct {
+	Token   string          `json:"token"`
+	Tool    string          `json:"tool"`
+	Layer   string          `json:"layer"`
+	Summary string          `json:"summary"`
+	Args    json.RawMessage `json:"args"`
+}
+
 type aiChatResponse struct {
-	Message string          `json:"message"`
-	Steps   []aiStep        `json:"steps,omitempty"`
-	Actions []aiAction      `json:"actions,omitempty"`
-	Results []aiResult      `json:"results,omitempty"`
-	Usage   json.RawMessage `json:"usage,omitempty"`
+	Message       string           `json:"message"`
+	Steps         []aiStep         `json:"steps,omitempty"`
+	Actions       []aiAction       `json:"actions,omitempty"`
+	Results       []aiResult       `json:"results,omitempty"`
+	PendingWrites []aiPendingWrite `json:"pendingWrites,omitempty"`
+	Usage         json.RawMessage  `json:"usage,omitempty"`
 }
 
 // ── OpenAI 兼容协议 ───────────────────────────────────────────
@@ -115,6 +130,7 @@ type aiToolOutcome struct {
 	Step    *aiStep
 	Actions []aiAction
 	Results []aiResult
+	Pending []aiPendingWrite
 }
 
 func stringPtr(s string) *string { return &s }
@@ -139,8 +155,8 @@ func (h *Handlers) aiChat(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = h.cfg.AIModel
 	}
-	if !validAIBaseURL(baseURL) {
-		writeError(w, http.StatusBadRequest, errString("X-AI-Base-URL 必须是 http/https 地址"))
+	if !validAIBaseURL(r.Context(), baseURL, h.cfg.AIAllowPrivate) {
+		writeError(w, http.StatusBadRequest, errString("X-AI-Base-URL 非法：必须是公网 http/https 地址（本地模型可设置 AI_ALLOW_PRIVATE=true）"))
 		return
 	}
 
@@ -228,12 +244,13 @@ func (h *Handlers) aiChat(w http.ResponseWriter, r *http.Request) {
 			if tc.ID == "" {
 				tc.ID = fmt.Sprintf("call_%d_%d", iteration, i)
 			}
-			outcome := h.executeAITool(r.Context(), user, tc.Function.Name, tc.Function.Arguments, req.AllowWrite)
+			outcome := h.executeAITool(r.Context(), user, tc.Function.Name, tc.Function.Arguments, req.AllowWrite, req.ConfirmWrites)
 			if outcome.Step != nil {
 				out.Steps = append(out.Steps, *outcome.Step)
 			}
 			out.Actions = append(out.Actions, outcome.Actions...)
 			out.Results = append(out.Results, outcome.Results...)
+			out.PendingWrites = append(out.PendingWrites, outcome.Pending...)
 			messages = append(messages, llmMessage{
 				Role:       "tool",
 				ToolCallID: tc.ID,
@@ -295,12 +312,43 @@ func callLLM(ctx context.Context, client *http.Client, baseURL, apiKey, model st
 	return &completion, nil
 }
 
-func validAIBaseURL(raw string) bool {
+func validAIBaseURL(ctx context.Context, raw string, allowPrivate bool) bool {
 	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil {
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return false
 	}
-	return u.Scheme == "http" || u.Scheme == "https"
+	host := u.Hostname()
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return aiHostAllowed(ip, allowPrivate)
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil || len(ips) == 0 {
+		return false
+	}
+	for _, ip := range ips {
+		if !aiHostAllowed(ip, allowPrivate) {
+			return false
+		}
+	}
+	return true
+}
+
+func aiHostAllowed(ip net.IP, allowPrivate bool) bool {
+	// 本地模型（Ollama）默认允许 loopback。
+	if ip.IsLoopback() {
+		return true
+	}
+	if allowPrivate {
+		return true
+	}
+	if ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsUnspecified() || ip.IsMulticast() {
+		return false
+	}
+	return true
 }
 
 func truncate(s string, n int) string {
@@ -308,4 +356,82 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "…"
+}
+
+// aiConfirm 执行用户确认后的 AI 写操作。
+func (h *Handlers) aiConfirm(w http.ResponseWriter, r *http.Request) {
+	user, ok := auth.UserFrom(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, errString("需要登录"))
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	payload, err := h.verifyAIPending(req.Token)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if payload.UserID != user.ID && user.Role != auth.RoleAdmin {
+		writeError(w, http.StatusForbidden, errString("该操作不属于当前用户"))
+		return
+	}
+	outcome := h.executeAITool(r.Context(), user, payload.Tool, string(payload.Args), true, false)
+	resp := aiChatResponse{Message: outcome.Result, Steps: nil, Actions: outcome.Actions, Results: outcome.Results}
+	if outcome.Step != nil {
+		resp.Steps = append(resp.Steps, *outcome.Step)
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	writeJSON(w, http.StatusOK, resp)
+}
+
+type aiPendingPayload struct {
+	UserID int64           `json:"uid"`
+	Tool   string          `json:"tool"`
+	Args   json.RawMessage `json:"args"`
+	Exp    int64           `json:"exp"`
+}
+
+func (h *Handlers) signAIPending(userID int64, tool, args string) (string, error) {
+	payload, err := json.Marshal(aiPendingPayload{
+		UserID: userID, Tool: tool, Args: json.RawMessage(args), Exp: time.Now().Add(5 * time.Minute).Unix(),
+	})
+	if err != nil {
+		return "", err
+	}
+	enc := base64.RawURLEncoding.EncodeToString(payload)
+	mac := hmac.New(sha256.New, []byte(h.cfg.JWTSecret))
+	mac.Write([]byte(enc))
+	sig := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	return enc + "." + sig, nil
+}
+
+func (h *Handlers) verifyAIPending(token string) (*aiPendingPayload, error) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("确认令牌非法")
+	}
+	mac := hmac.New(sha256.New, []byte(h.cfg.JWTSecret))
+	mac.Write([]byte(parts[0]))
+	expected := base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
+	if !hmac.Equal([]byte(expected), []byte(parts[1])) {
+		return nil, fmt.Errorf("确认令牌签名无效")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("确认令牌非法")
+	}
+	var payload aiPendingPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("确认令牌非法")
+	}
+	if payload.Exp < time.Now().Unix() {
+		return nil, fmt.Errorf("确认令牌已过期，请重新发起请求")
+	}
+	return &payload, nil
 }

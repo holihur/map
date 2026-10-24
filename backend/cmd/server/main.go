@@ -71,6 +71,14 @@ func main() {
 	}
 
 	go func() {
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			log.Info("MapServer 已启动（HTTPS）", "addr", cfg.Addr)
+			if err := srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Error("HTTPS 服务异常退出", "err", err)
+				stop()
+			}
+			return
+		}
 		log.Info("MapServer 已启动", "addr", cfg.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error("HTTP 服务异常退出", "err", err)

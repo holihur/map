@@ -38,6 +38,7 @@ import {
   AI_PROVIDERS,
   DEFAULT_AI_CONFIG,
   aiChat,
+  aiConfirm,
   loadAIConfig,
   saveAIConfig,
   type AIAction,
@@ -76,6 +77,7 @@ export function AiAssistant({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [last, setLast] = useState<AIChatResponse | null>(null);
+  const [confirming, setConfirming] = useState("");
   const bottomRef = useRef<HTMLDivElement>(null);
 
   const providerId = useMemo(() => {
@@ -130,6 +132,25 @@ export function AiAssistant({
     setMessages([]);
     setLast(null);
     setError("");
+  };
+
+  const confirmWrite = async (token: string, summary: string) => {
+    setConfirming(token);
+    try {
+      const res = await aiConfirm(token);
+      setLast((prev) =>
+        prev
+          ? { ...prev, pendingWrites: prev.pendingWrites?.filter((x) => x.token !== token) }
+          : prev
+      );
+      for (const action of res.actions ?? []) onAction?.(action);
+      setMessages((prev) => [...prev, { role: "assistant", content: `已执行：${summary}` }]);
+      toast.success("已执行 AI 写操作");
+    } catch (err) {
+      toast.error((err as Error).message);
+    } finally {
+      setConfirming("");
+    }
   };
 
   return (
@@ -224,7 +245,7 @@ export function AiAssistant({
               <span>
                 允许写操作
                 <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                  AI 可直接调用 update_features / delete_features。仅在你信任当前模型与提示词时开启。
+                  AI 可调用 update_features / delete_features。仅在你信任当前模型与提示词时开启。
                 </span>
               </span>
               <Switch
@@ -232,6 +253,20 @@ export function AiAssistant({
                 onCheckedChange={(v) => setDraft((d) => ({ ...d, allowWrite: v }))}
               />
             </label>
+            {draft.allowWrite && (
+              <label className="flex items-start justify-between gap-3 rounded-md border p-3 text-sm">
+                <span>
+                  写操作二次确认
+                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                    默认开启：AI 只生成待确认令牌，必须由你点击「确认执行」才会修改数据。
+                  </span>
+                </span>
+                <Switch
+                  checked={draft.confirmWrites}
+                  onCheckedChange={(v) => setDraft((d) => ({ ...d, confirmWrites: v }))}
+                />
+              </label>
+            )}
             <div className="flex gap-2">
               <Button className="flex-1" onClick={saveSettings}>
                 <Check className="h-4 w-4" /> 保存配置
@@ -364,6 +399,54 @@ export function AiAssistant({
                   </div>
                 )}
 
+                {last?.pendingWrites && last.pendingWrites.length > 0 && (
+                  <div className="space-y-2 rounded-md border border-amber-300 bg-amber-50 p-3 dark:bg-amber-950/30">
+                    <div className="text-xs font-medium text-amber-800 dark:text-amber-300">
+                      待确认的写操作
+                    </div>
+                    {last.pendingWrites.map((p) => (
+                      <div key={p.token} className="flex flex-wrap items-center gap-2 text-xs">
+                        <Badge variant="outline" className="font-mono text-[10px]">
+                          {p.tool}
+                        </Badge>
+                        <span className="min-w-0 flex-1">{p.summary}</span>
+                        <Button
+                          size="sm"
+                          className="h-7"
+                          disabled={confirming === p.token}
+                          onClick={() => void confirmWrite(p.token, p.summary)}
+                        >
+                          {confirming === p.token ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <Check className="h-3.5 w-3.5" />
+                          )}
+                          确认执行
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-7"
+                          onClick={() =>
+                            setLast((prev) =>
+                              prev
+                                ? {
+                                    ...prev,
+                                    pendingWrites: prev.pendingWrites?.filter(
+                                      (x) => x.token !== p.token
+                                    ),
+                                  }
+                                : prev
+                            )
+                          }
+                        >
+                          忽略
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 {error && (
                   <div className="flex items-start justify-between gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
                     <span>{error}</span>
@@ -406,7 +489,12 @@ export function AiAssistant({
                 </Button>
               </div>
               <p className="mt-1.5 text-[10px] text-muted-foreground">
-                默认 DeepSeek · 密钥仅保存在本浏览器 · 写操作{config.allowWrite ? "已开启" : "已关闭"}
+                默认 DeepSeek · 密钥仅保存在本浏览器 · 写操作
+                {config.allowWrite
+                  ? config.confirmWrites
+                    ? "已开启（需二次确认）"
+                    : "已开启（直接执行）"
+                  : "已关闭"}
               </p>
             </div>
           </>

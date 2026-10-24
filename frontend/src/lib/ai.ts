@@ -5,6 +5,7 @@ export interface AIConfig {
   apiKey: string;
   model: string;
   allowWrite: boolean;
+  confirmWrites: boolean;
 }
 
 export const DEFAULT_AI_CONFIG: AIConfig = {
@@ -12,6 +13,7 @@ export const DEFAULT_AI_CONFIG: AIConfig = {
   apiKey: "",
   model: "deepseek-chat",
   allowWrite: false,
+  confirmWrites: true,
 };
 
 export const AI_PROVIDERS: Array<{ id: string; label: string; baseUrl: string; model: string }> = [
@@ -34,6 +36,7 @@ export function loadAIConfig(): AIConfig {
       apiKey: parsed.apiKey || "",
       model: parsed.model || DEFAULT_AI_CONFIG.model,
       allowWrite: parsed.allowWrite ?? false,
+      confirmWrites: parsed.confirmWrites ?? true,
     };
   } catch {
     return { ...DEFAULT_AI_CONFIG };
@@ -93,11 +96,20 @@ export interface AIResult {
   total: number;
 }
 
+export interface AIPendingWrite {
+  token: string;
+  tool: string;
+  layer: string;
+  summary: string;
+  args?: unknown;
+}
+
 export interface AIChatResponse {
   message: string;
   steps?: AIStep[];
   actions?: AIAction[];
   results?: AIResult[];
+  pendingWrites?: AIPendingWrite[];
   usage?: unknown;
 }
 
@@ -121,6 +133,7 @@ export async function aiChat(
       messages,
       context,
       allowWrite: config.allowWrite,
+      confirmWrites: config.confirmWrites,
     }),
   });
   if (res.status === 401 && typeof window !== "undefined") {
@@ -128,6 +141,30 @@ export async function aiChat(
   }
   if (!res.ok) {
     let message = `请求失败 (${res.status})`;
+    try {
+      const body = (await res.json()) as { error?: string };
+      if (body?.error) message = body.error;
+    } catch {
+      /* ignore */
+    }
+    throw new Error(message);
+  }
+  return (await res.json()) as AIChatResponse;
+}
+
+/** 确认执行 AI 提出的写操作。 */
+export async function aiConfirm(token: string): Promise<AIChatResponse> {
+  const authToken = getAuthToken();
+  const res = await fetch(`${API_BASE}/api/ai/confirm`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
+    body: JSON.stringify({ token }),
+  });
+  if (!res.ok) {
+    let message = `确认失败 (${res.status})`;
     try {
       const body = (await res.json()) as { error?: string };
       if (body?.error) message = body.error;

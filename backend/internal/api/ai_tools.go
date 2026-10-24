@@ -175,7 +175,7 @@ func aiToolDefs() []llmTool {
 	}
 }
 
-func (h *Handlers) executeAITool(ctx context.Context, user *models.User, name, rawArgs string, allowWrite bool) aiToolOutcome {
+func (h *Handlers) executeAITool(ctx context.Context, user *models.User, name, rawArgs string, allowWrite, confirmWrites bool) aiToolOutcome {
 	var args aiQueryArgs
 	if strings.TrimSpace(rawArgs) != "" {
 		if err := json.Unmarshal([]byte(rawArgs), &args); err != nil {
@@ -201,9 +201,9 @@ func (h *Handlers) executeAITool(ctx context.Context, user *models.User, name, r
 	case "map_action":
 		return h.aiMapAction(ctx, args, stepArgs)
 	case "update_features":
-		return h.aiUpdateFeatures(ctx, args, stepArgs, allowWrite)
+		return h.aiUpdateFeatures(ctx, args, stepArgs, allowWrite, confirmWrites)
 	case "delete_features":
-		return h.aiDeleteFeatures(ctx, args, stepArgs, allowWrite)
+		return h.aiDeleteFeatures(ctx, args, stepArgs, allowWrite, confirmWrites)
 	default:
 		return toolError("未知工具: " + name)
 	}
@@ -536,7 +536,7 @@ func (h *Handlers) aiWriteLayer(ctx context.Context, name string) (*models.Layer
 	return l, nil
 }
 
-func (h *Handlers) aiUpdateFeatures(ctx context.Context, args aiQueryArgs, stepArgs json.RawMessage, allowWrite bool) aiToolOutcome {
+func (h *Handlers) aiUpdateFeatures(ctx context.Context, args aiQueryArgs, stepArgs json.RawMessage, allowWrite, confirmWrites bool) aiToolOutcome {
 	if !allowWrite {
 		return toolError("写操作未启用：请用户在前端打开「允许写操作」后再试")
 	}
@@ -554,6 +554,9 @@ func (h *Handlers) aiUpdateFeatures(ctx context.Context, args aiQueryArgs, stepA
 	if len(q.IDs) == 0 && len(q.Filters) == 0 && q.BBox == nil {
 		return toolError("必须提供 ids 或 filters/bbox，拒绝批量更新全部要素")
 	}
+	if confirmWrites {
+		return h.pendingWrite(ctx, "update_features", l.Name, stepArgs, "待确认：批量更新要素属性")
+	}
 	affected, err := h.store.UpdateFeaturesWhere(ctx, l, q, args.Properties)
 	if err != nil {
 		return toolError(err.Error())
@@ -567,7 +570,7 @@ func (h *Handlers) aiUpdateFeatures(ctx context.Context, args aiQueryArgs, stepA
 	return aiToolOutcome{Result: toolJSON(map[string]any{"affected": affected}), Step: step}
 }
 
-func (h *Handlers) aiDeleteFeatures(ctx context.Context, args aiQueryArgs, stepArgs json.RawMessage, allowWrite bool) aiToolOutcome {
+func (h *Handlers) aiDeleteFeatures(ctx context.Context, args aiQueryArgs, stepArgs json.RawMessage, allowWrite, confirmWrites bool) aiToolOutcome {
 	if !allowWrite {
 		return toolError("写操作未启用：请用户在前端打开「允许写操作」后再试")
 	}
@@ -581,6 +584,9 @@ func (h *Handlers) aiDeleteFeatures(ctx context.Context, args aiQueryArgs, stepA
 	}
 	if len(q.IDs) == 0 && len(q.Filters) == 0 && q.BBox == nil {
 		return toolError("必须提供 ids 或 filters/bbox，拒绝删除全部要素")
+	}
+	if confirmWrites {
+		return h.pendingWrite(ctx, "delete_features", l.Name, stepArgs, "待确认：批量删除要素")
 	}
 	affected, err := h.store.DeleteFeaturesWhere(ctx, l, q)
 	if err != nil {
@@ -619,4 +625,24 @@ func (h *Handlers) aiAudit(ctx context.Context, action, layer string, detail map
 		entry.Detail = b
 	}
 	_ = h.store.InsertAuditLog(ctx, entry)
+}
+
+// pendingWrite 生成待确认写操作令牌；用户在前端确认后才真正执行。
+func (h *Handlers) pendingWrite(ctx context.Context, tool, layer string, args json.RawMessage, summary string) aiToolOutcome {
+	user, _ := auth.UserFrom(ctx)
+	var uid int64
+	if user != nil {
+		uid = user.ID
+	}
+	token, err := h.signAIPending(uid, tool, string(args))
+	if err != nil {
+		return toolError(err.Error())
+	}
+	pw := aiPendingWrite{Token: token, Tool: tool, Layer: layer, Summary: summary, Args: args}
+	step := &aiStep{Tool: tool, Args: args, Summary: summary + "（等待用户确认）"}
+	return aiToolOutcome{
+		Result:  toolJSON(map[string]any{"status": "pending_confirmation", "token": token, "message": "已生成待确认操作，请让用户在前端确认后执行"}),
+		Step:    step,
+		Pending: []aiPendingWrite{pw},
+	}
 }
