@@ -42,6 +42,11 @@ type Config struct {
 
 	// 前端静态资源目录（为空时自动探测，优先使用内嵌资源）
 	StaticDir string
+
+	// 自然语言地图助手（BYOK：密钥由客户端每次请求携带，不落库）
+	AIBaseURL string
+	AIModel   string
+	AITimeout time.Duration
 }
 
 // Load 读取环境变量并返回配置，未设置时使用合理默认值。
@@ -72,6 +77,10 @@ func Load() Config {
 		TileCacheMaxMB:   envInt("TILE_CACHE_MAX_MB", 256),
 
 		StaticDir: env("STATIC_DIR", ""),
+
+		AIBaseURL: env("AI_BASE_URL", "https://api.deepseek.com/v1"),
+		AIModel:   env("AI_MODEL", "deepseek-chat"),
+		AITimeout: time.Duration(envInt("AI_TIMEOUT_SECONDS", 60)) * time.Second,
 	}
 }
 

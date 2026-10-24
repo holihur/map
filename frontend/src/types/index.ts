@@ -14,7 +14,7 @@ export interface LayerField {
 }
 
 export interface LayerStyle {
-  type?: "fill" | "line" | "circle" | "symbol";
+  type?: "fill" | "line" | "circle" | "symbol" | "raster" | "heatmap";
   paint?: Record<string, unknown>;
   layout?: Record<string, unknown>;
   [key: string]: unknown;
@@ -39,6 +39,46 @@ export interface Layer {
   featureCount: number;
   createdAt: string;
   updatedAt: string;
+  /** 第三方图层（不落 PostGIS）。 */
+  external?: boolean;
+  sourceType?: ExternalSourceType;
+  sourceUrl?: string;
+  sourceOptions?: Record<string, unknown>;
+}
+
+export type ExternalSourceType = "xyz" | "wms" | "wmts" | "mvt" | "geojson" | "arcgis";
+
+export interface ExternalLayer {
+  id: number;
+  name: string;
+  title: string;
+  description: string;
+  sourceType: ExternalSourceType;
+  sourceUrl: string;
+  sourceOptions: Record<string, unknown>;
+  style: LayerStyle;
+  metadata: Record<string, unknown>;
+  minZoom: number;
+  maxZoom: number;
+  sortOrder: number;
+  visibility: "public" | "private";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateExternalLayerInput {
+  name: string;
+  title?: string;
+  description?: string;
+  sourceType: ExternalSourceType;
+  sourceUrl: string;
+  sourceOptions?: Record<string, unknown>;
+  style?: LayerStyle;
+  metadata?: Record<string, unknown>;
+  minZoom?: number;
+  maxZoom?: number;
+  sortOrder?: number;
+  visibility?: "public" | "private";
 }
 
 export interface CreateLayerInput {
@@ -126,7 +166,17 @@ export interface TileMatrixSet {
   maxZoom: number;
 }
 
-export type BasemapId = "solid" | "osm" | "carto-light" | "carto-dark" | "satellite";
+export type BasemapId =
+  | "solid"
+  | "osm"
+  | "carto-light"
+  | "carto-dark"
+  | "satellite"
+  | "amap"
+  | "amap-satellite"
+  | "google"
+  | "google-satellite"
+  | "google-hybrid";
 
 export interface LayerViewState {
   visible: boolean;

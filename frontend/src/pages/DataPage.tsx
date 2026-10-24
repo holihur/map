@@ -202,6 +202,15 @@ export function DataPage() {
     setBatchField("");
   }, [layerName]);
 
+  // 支持从地图/AI 助手跳转时带上 q 与 bbox。
+  useEffect(() => {
+    const q = params.get("q") ?? "";
+    if (q) {
+      setTextQuery(q);
+      setAppliedQuery(q);
+    }
+  }, [params]);
+
   const applyFilter = () => {
     setAppliedFilters(filters.filter((f) => f.field));
     setAppliedQuery(textQuery);

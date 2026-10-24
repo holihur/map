@@ -37,7 +37,18 @@ export function normalizeWorkspace(ws: MapWorkspace | null, layers: Layer[]): Ma
   return {
     version: 1,
     name: ws.name,
-    basemap: ["solid", "osm", "carto-light", "carto-dark", "satellite"].includes(ws.basemap)
+    basemap: [
+      "solid",
+      "osm",
+      "carto-light",
+      "carto-dark",
+      "satellite",
+      "amap",
+      "amap-satellite",
+      "google",
+      "google-satellite",
+      "google-hybrid",
+    ].includes(ws.basemap)
       ? ws.basemap
       : base.basemap,
     backgroundColor: ws.backgroundColor ?? base.backgroundColor,

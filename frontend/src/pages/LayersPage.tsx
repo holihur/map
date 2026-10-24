@@ -15,6 +15,7 @@ import {
 import { toast } from "sonner";
 
 import { CRSInput } from "@/components/CRSInput";
+import { ExternalLayerDialog } from "@/components/ExternalLayerDialog";
 import { ImportLayerDialog } from "@/components/ImportLayerDialog";
 import { LayerFormDialog } from "@/components/LayerFormDialog";
 import { StyleEditor } from "@/components/StyleEditor";
@@ -46,8 +47,10 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import {
+  deleteExternalLayer,
   deleteLayer,
   getLayerAccess,
+  listExternalLayers,
   listLayers,
   listUsers,
   reorderLayers,
@@ -57,14 +60,17 @@ import {
   type LayerAccess,
 } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
-import type { Layer } from "@/types";
+import type { ExternalLayer, Layer } from "@/types";
 
 export function LayersPage() {
   const { can } = useAuth();
   const editable = can("editor");
   const isAdmin = can("admin");
   const [layers, setLayers] = useState<Layer[]>([]);
+  const [externalLayers, setExternalLayers] = useState<ExternalLayer[]>([]);
   const [loading, setLoading] = useState(true);
+  const [externalOpen, setExternalOpen] = useState(false);
+  const [editExternal, setEditExternal] = useState<ExternalLayer | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [styleLayer, setStyleLayer] = useState<Layer | null>(null);
@@ -80,7 +86,9 @@ export function LayersPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      setLayers(await listLayers());
+      const [base, external] = await Promise.all([listLayers(), listExternalLayers()]);
+      setLayers(base);
+      setExternalLayers(external);
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
@@ -91,6 +99,17 @@ export function LayersPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const removeExternal = async (layer: ExternalLayer) => {
+    if (!window.confirm(`删除第三方图层「${layer.title || layer.name}」？`)) return;
+    try {
+      await deleteExternalLayer(layer.name);
+      toast.success("第三方图层已删除");
+      void refresh();
+    } catch (err) {
+      toast.error((err as Error).message);
+    }
+  };
 
   const remove = async (layer: Layer) => {
     if (
@@ -195,6 +214,17 @@ export function LayersPage() {
               )}
               刷新
             </Button>
+            {editable && (
+              <Button
+                variant="outline"
+                onClick={() => {
+                  setEditExternal(null);
+                  setExternalOpen(true);
+                }}
+              >
+                <Globe2 className="h-4 w-4" /> 第三方图层
+              </Button>
+            )}
             {editable && (
               <Button variant="outline" onClick={() => setImportOpen(true)}>
                 <Upload className="h-4 w-4" /> 上传数据建层
@@ -346,12 +376,114 @@ export function LayersPage() {
             </Table>
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0">
+            <CardTitle className="text-base">
+              第三方图层（{externalLayers.length}）
+            </CardTitle>
+            {editable && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  setEditExternal(null);
+                  setExternalOpen(true);
+                }}
+              >
+                <Plus className="h-4 w-4" /> 添加
+              </Button>
+            )}
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>名称</TableHead>
+                  <TableHead>类型</TableHead>
+                  <TableHead className="hidden md:table-cell">数据源</TableHead>
+                  <TableHead className="hidden sm:table-cell">缩放</TableHead>
+                  <TableHead>可见性</TableHead>
+                  <TableHead className="text-right">操作</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {externalLayers.map((l) => (
+                  <TableRow key={l.id}>
+                    <TableCell>
+                      <div className="font-medium">{l.title || l.name}</div>
+                      <div className="font-mono text-xs text-muted-foreground">{l.name}</div>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">{l.sourceType.toUpperCase()}</Badge>
+                      {typeof (l.metadata as any)?.provider === "string" && (
+                        <Badge variant="outline" className="ml-1 text-[10px]">
+                          {(l.metadata as any).provider}
+                        </Badge>
+                      )}
+                    </TableCell>
+                    <TableCell className="hidden max-w-[320px] truncate font-mono text-[11px] text-muted-foreground md:table-cell">
+                      {l.sourceUrl}
+                    </TableCell>
+                    <TableCell className="hidden sm:table-cell text-xs text-muted-foreground">
+                      {l.minZoom}–{l.maxZoom}
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant={l.visibility === "private" ? "secondary" : "outline"}>
+                        {l.visibility === "private" ? "私有" : "公开"}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="text-right">
+                      {editable && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => {
+                            setEditExternal(l);
+                            setExternalOpen(true);
+                          }}
+                        >
+                          编辑
+                        </Button>
+                      )}
+                      {editable && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          onClick={() => void removeExternal(l)}
+                        >
+                          <Trash2 className="h-4 w-4 text-destructive" />
+                        </Button>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {externalLayers.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-8 text-center text-sm text-muted-foreground">
+                      暂无第三方图层，可添加高德 / Google / Mapbox / WMS / WMTS / MVT / GeoJSON
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
       </div>
 
       <LayerFormDialog
         open={dialogOpen}
         onOpenChange={setDialogOpen}
         onCreated={() => void refresh()}
+      />
+      <ExternalLayerDialog
+        layer={editExternal}
+        open={externalOpen}
+        onOpenChange={(v) => {
+          setExternalOpen(v);
+          if (!v) setEditExternal(null);
+        }}
+        onSaved={() => void refresh()}
       />
       <ImportLayerDialog
         open={importOpen}

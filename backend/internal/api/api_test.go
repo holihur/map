@@ -167,6 +167,7 @@ func resetTestDB(ctx context.Context, pool *pgxpool.Pool) {
 			}
 		}
 	}
+	_, _ = pool.Exec(ctx, `DELETE FROM external_layers`)
 	_, _ = pool.Exec(ctx, `DELETE FROM layer_access`)
 	_, _ = pool.Exec(ctx, `DELETE FROM layers`)
 	_, _ = pool.Exec(ctx, `DELETE FROM styles`)

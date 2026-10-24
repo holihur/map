@@ -8,6 +8,7 @@ import type {
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import { basemapById } from "@/lib/basemaps";
+import { externalDataUrl, externalTileUrl, isRasterSource, sourceLayerOf } from "@/lib/external";
 import { tileUrlTemplate } from "@/lib/api";
 import type {
   BasemapId,
@@ -96,6 +97,8 @@ function defaultPaint(type: string): Record<string, unknown> {
       };
     case "line":
       return { "line-color": "#2563eb", "line-width": 2 };
+    case "raster":
+      return { "raster-opacity": 1 };
     case "heatmap":
       return {
         "heatmap-radius": 20,
@@ -142,6 +145,9 @@ function withOpacity(paint: Record<string, unknown>, type: string, opacity: numb
     case "heatmap":
       scale("heatmap-opacity");
       break;
+    case "raster":
+      scale("raster-opacity");
+      break;
     default:
       break;
   }
@@ -158,20 +164,65 @@ function popupFieldsOf(l: Layer): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : [];
 }
 
+function sourceLayerProps(l: Layer): Record<string, string> {
+  if (l.external) {
+    return l.sourceType === "mvt" ? { "source-layer": sourceLayerOf(l) } : {};
+  }
+  return { "source-layer": l.name };
+}
+
 function buildLayerSpec(l: Layer, state: LayerViewState): Record<string, any> {
   const style = (state.styleOverride ?? l.style ?? {}) as Record<string, any>;
-  const type: string = style.type ?? defaultType(l.geometryType);
+  const type: string =
+    l.external && isRasterSource(l.sourceType)
+      ? "raster"
+      : style.type ?? defaultType(l.geometryType);
   const basePaint = (style.paint ?? defaultPaint(type)) as Record<string, unknown>;
   return {
     id: `lyr-${l.name}`,
     type,
     source: `src-${l.name}`,
-    "source-layer": l.name,
+    ...sourceLayerProps(l),
     minzoom: l.minZoom,
     maxzoom: l.maxZoom,
     layout: { ...(style.layout ?? {}), visibility: state.visible ? "visible" : "none" },
     paint: withOpacity(basePaint, type, state.opacity ?? 1),
   };
+}
+
+function addSourceForLayer(map: MLMap, l: Layer, srcId: string) {
+  const opts = (l.sourceOptions ?? {}) as Record<string, any>;
+  if (l.external) {
+    if (isRasterSource(l.sourceType)) {
+      map.addSource(srcId, {
+        type: "raster",
+        tiles: [externalTileUrl(l)],
+        tileSize: Number(opts.tileSize) || 256,
+        minzoom: l.minZoom,
+        maxzoom: l.maxZoom,
+        attribution: typeof opts.attribution === "string" ? opts.attribution : undefined,
+        scheme: opts.scheme === "tms" ? "tms" : "xyz",
+      });
+      return;
+    }
+    if (l.sourceType === "geojson") {
+      map.addSource(srcId, { type: "geojson", data: externalDataUrl(l) });
+      return;
+    }
+    map.addSource(srcId, {
+      type: "vector",
+      tiles: [externalTileUrl(l)],
+      minzoom: l.minZoom,
+      maxzoom: l.maxZoom,
+    });
+    return;
+  }
+  map.addSource(srcId, {
+    type: "vector",
+    tiles: [tileUrlTemplate(l.name)],
+    minzoom: l.minZoom,
+    maxzoom: l.maxZoom,
+  });
 }
 
 function setupTransientLayers(map: MLMap) {
@@ -388,12 +439,7 @@ function syncLayers(map: MLMap, layers: Layer[], view: Record<string, LayerViewS
     const vis = state.visible !== false;
     desired.add(layId);
     if (!map.getSource(srcId)) {
-      map.addSource(srcId, {
-        type: "vector",
-        tiles: [tileUrlTemplate(l.name)],
-        minzoom: l.minZoom,
-        maxzoom: l.maxZoom,
-      });
+      addSourceForLayer(map, l, srcId);
     }
     const spec = buildLayerSpec(l, state);
     const existing = map.getLayer(layId);
@@ -410,7 +456,7 @@ function syncLayers(map: MLMap, layers: Layer[], view: Record<string, LayerViewS
           id: outlineId,
           type: "line",
           source: srcId,
-          "source-layer": l.name,
+          ...sourceLayerProps(l),
           minzoom: l.minZoom,
           maxzoom: l.maxZoom,
           layout: { visibility: vis ? "visible" : "none" },
@@ -434,7 +480,7 @@ function syncLayers(map: MLMap, layers: Layer[], view: Record<string, LayerViewS
       }
     }
     const labelField = labelFieldOf(l);
-    if (labelField) {
+    if (labelField && !isRasterSource(l.sourceType)) {
       desired.add(labelId);
       const meta = (l.metadata ?? {}) as Record<string, any>;
       const layout = {
@@ -455,7 +501,7 @@ function syncLayers(map: MLMap, layers: Layer[], view: Record<string, LayerViewS
           id: labelId,
           type: "symbol",
           source: srcId,
-          "source-layer": l.name,
+          ...sourceLayerProps(l),
           minzoom: l.minZoom,
           maxzoom: l.maxZoom,
           layout,

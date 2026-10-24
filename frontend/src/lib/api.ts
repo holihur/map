@@ -3,7 +3,9 @@ import type {
   AuditLog,
   CRS,
   Capabilities,
+  CreateExternalLayerInput,
   CreateLayerInput,
+  ExternalLayer,
   FeatureCollection,
   FeatureQuery,
   FieldStat,
@@ -723,4 +725,38 @@ export async function analyzeFeatures(
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+// ── 第三方图层（XYZ / WMS / WMTS / MVT / GeoJSON / ArcGIS）──────
+
+export async function listExternalLayers(): Promise<ExternalLayer[]> {
+  const data = await request<{ layers: ExternalLayer[] }>("/api/external-layers");
+  return data.layers ?? [];
+}
+
+export async function getExternalLayer(name: string): Promise<ExternalLayer> {
+  return request<ExternalLayer>(`/api/external-layers/${encodeURIComponent(name)}`);
+}
+
+export async function createExternalLayer(
+  input: CreateExternalLayerInput
+): Promise<ExternalLayer> {
+  return request<ExternalLayer>("/api/external-layers", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+export async function updateExternalLayer(
+  name: string,
+  patch: Partial<CreateExternalLayerInput>
+): Promise<ExternalLayer> {
+  return request<ExternalLayer>(`/api/external-layers/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export async function deleteExternalLayer(name: string): Promise<void> {
+  await request<void>(`/api/external-layers/${encodeURIComponent(name)}`, { method: "DELETE" });
 }

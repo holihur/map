@@ -97,12 +97,15 @@ func (a *Authenticator) RequireRole(role string) func(http.Handler) http.Handler
 }
 
 func bearerToken(r *http.Request) string {
-	h := r.Header.Get("Authorization")
-	if h == "" {
+	if h := r.Header.Get("Authorization"); h != "" {
+		if after, ok := strings.CutPrefix(h, "Bearer "); ok {
+			return strings.TrimSpace(after)
+		}
 		return ""
 	}
-	if after, ok := strings.CutPrefix(h, "Bearer "); ok {
-		return strings.TrimSpace(after)
+	// MapLibre 的瓦片请求无法附加自定义 Header；仅对外部图层代理开放 query token。
+	if strings.HasPrefix(r.URL.Path, "/api/external-layers/") {
+		return strings.TrimSpace(r.URL.Query().Get("access_token"))
 	}
 	return ""
 }

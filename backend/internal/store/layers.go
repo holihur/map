@@ -192,6 +192,16 @@ func (s *Store) CreateLayer(ctx context.Context, req models.CreateLayerRequest) 
 		}
 	}
 
+	// 避免与第三方图层同名（前端以 name 作为唯一键）。
+	var extExists bool
+	if err := s.pool.QueryRow(ctx,
+		`SELECT EXISTS(SELECT 1 FROM external_layers WHERE name=$1)`, name).Scan(&extExists); err != nil {
+		return nil, err
+	}
+	if extExists {
+		return nil, fmt.Errorf("图层名 %q 已被第三方图层占用", name)
+	}
+
 	table := "layer_" + name
 	minZoom, maxZoom := 0, 22
 	if req.MinZoom != nil {

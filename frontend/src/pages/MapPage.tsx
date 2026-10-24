@@ -21,6 +21,7 @@ import {
   RefreshCw,
   Search,
   Share2,
+  Sparkles,
   SlidersHorizontal,
   Trash2,
   Undo2,
@@ -28,6 +29,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AiAssistant } from "@/components/AiAssistant";
 import { MapView, type DrawMode, type EditMode, type MapViewState, type SelectedFeature } from "@/components/map/MapView";
 import { StyleEditor } from "@/components/StyleEditor";
 import { Badge } from "@/components/ui/badge";
@@ -66,12 +68,15 @@ import {
   deleteFeature,
   getFeature,
   layerBounds,
+  listExternalLayers,
   listLayers,
   searchAll,
   updateFeature,
   wmsGetMapMultiUrl,
 } from "@/lib/api";
+import type { AIAction } from "@/lib/ai";
 import { BASEMAPS } from "@/lib/basemaps";
+import { mergeLayers } from "@/lib/external";
 import { useAuth } from "@/lib/auth";
 import {
   boundsOfGeometry,
@@ -93,7 +98,7 @@ import type {
 
 /** 根据图层几何类型返回允许的绘制模式。 */
 function allowedModes(layer: Layer | null): DrawMode[] {
-  if (!layer) return [];
+  if (!layer || layer.external) return [];
   const g = layer.geometryType.toUpperCase();
   if (g.includes("POINT")) return ["point"];
   if (g.includes("LINE")) return ["line"];
@@ -133,6 +138,7 @@ export function MapPage() {
   const [mapView, setMapView] = useState<MapViewState | null>(null);
   const [loading, setLoading] = useState(true);
   const [layerPanelOpen, setLayerPanelOpen] = useState(false);
+  const [aiOpen, setAiOpen] = useState(false);
   const [styleLayer, setStyleLayer] = useState<Layer | null>(null);
   const [shareOpen, setShareOpen] = useState(false);
   const [shareName, setShareName] = useState("我的地图");
@@ -174,10 +180,11 @@ export function MapPage() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await listLayers();
-      setLayers(data);
-      setWs((prev) => normalizeWorkspace(prev, data));
-      setDrawLayerName((prev) => prev || data[0]?.name || "");
+      const [data, external] = await Promise.all([listLayers(), listExternalLayers()]);
+      const merged = mergeLayers(data, external);
+      setLayers(merged);
+      setWs((prev) => normalizeWorkspace(prev, merged));
+      setDrawLayerName((prev) => prev || data[0]?.name || merged[0]?.name || "");
     } catch (err) {
       toast.error((err as Error).message);
     } finally {
@@ -228,6 +235,8 @@ export function MapPage() {
     try {
       if (layer.bounds) {
         setFlyTo([...layer.bounds]);
+      } else if (layer.external) {
+        toast.info("第三方图层未设置数据范围，请手动缩放");
       } else {
         const b = await layerBounds(layer.name);
         if (b) setFlyTo(b);
@@ -301,6 +310,15 @@ export function MapPage() {
 
   const handleSelect = (sel: SelectedFeature) => {
     setSelected(sel);
+    const l = layers.find((x) => x.name === sel.layer);
+    if (l?.external) {
+      // 第三方图层没有服务端要素接口，只展示客户端属性。
+      setSelectedFeature(null);
+      setHighlight(null);
+      setHistory([]);
+      setHistoryIndex(-1);
+      return;
+    }
     if (sel.id !== undefined) {
       void focusFeature(sel.layer, sel.id, false);
     } else {
@@ -433,7 +451,9 @@ export function MapPage() {
 
   const exportImage = () => {
     if (!mapView) return;
-    const names = ordered.filter((l) => ws.layers[l.name]?.visible !== false).map((l) => l.name);
+    const names = ordered
+      .filter((l) => !l.external && ws.layers[l.name]?.visible !== false)
+      .map((l) => l.name);
     if (!names.length) {
       toast.info("没有可见图层");
       return;
@@ -457,7 +477,9 @@ export function MapPage() {
 
   const printImage = () => {
     if (!mapView) return;
-    const names = ordered.filter((l) => ws.layers[l.name]?.visible !== false);
+    const names = ordered.filter(
+      (l) => !l.external && ws.layers[l.name]?.visible !== false
+    );
     if (!names.length) {
       toast.info("没有可见图层");
       return;
@@ -527,6 +549,37 @@ export function MapPage() {
     }
   };
 
+  const applyAIAction = (action: AIAction) => {
+    switch (action.type) {
+      case "fly_to_layer": {
+        const l = layers.find((x) => x.name === action.layer);
+        if (l) void zoomTo(l);
+        break;
+      }
+      case "fly_to_bounds":
+        if (action.bounds) setFlyTo(action.bounds);
+        break;
+      case "highlight_features":
+        if (action.layer && action.featureIds?.length) {
+          void focusFeature(action.layer, action.featureIds[0], true);
+        }
+        break;
+      case "open_data": {
+        const params = new URLSearchParams();
+        if (action.layer) params.set("layer", action.layer);
+        if (action.bbox) params.set("bbox", action.bbox.join(","));
+        if (action.query) params.set("q", action.query);
+        navigate(`/data?${params.toString()}`);
+        break;
+      }
+      case "set_layer_visibility":
+        if (action.layer && action.visible !== undefined) {
+          updateViewState(action.layer, { visible: action.visible });
+        }
+        break;
+    }
+  };
+
   const handleBoxSelect = (bbox: [number, number, number, number]) => {
     setBoxSelect(false);
     const target = drawLayerName || ordered[0]?.name || "";
@@ -573,6 +626,11 @@ export function MapPage() {
                 {l.geometryType}
               </Badge>
               <span>{l.featureCount}</span>
+              {l.external && (
+                <Badge variant="outline" className="px-1 py-0 text-[10px]">
+                  第三方
+                </Badge>
+              )}
               {l.visibility === "private" && (
                 <Badge variant="secondary" className="px-1 py-0 text-[10px]">
                   私有
@@ -608,7 +666,7 @@ export function MapPage() {
             >
               <Crosshair className="h-4 w-4" />
             </Button>
-            {editable && (
+            {editable && !l.external && (
               <Button
                 variant="ghost"
                 size="icon"
@@ -738,6 +796,9 @@ export function MapPage() {
         <Button variant="outline" size="sm" onClick={() => setShareOpen(true)}>
           <Share2 className="h-3.5 w-3.5" /> 分享
         </Button>
+        <Button variant="outline" size="sm" onClick={() => setAiOpen(true)}>
+          <Sparkles className="h-3.5 w-3.5" /> AI 助手
+        </Button>
       </div>
     </>
   );
@@ -816,7 +877,7 @@ export function MapPage() {
                 <SelectValue placeholder="选择图层" />
               </SelectTrigger>
               <SelectContent>
-                {layers.map((l) => (
+                {layers.filter((l) => !l.external).map((l) => (
                   <SelectItem key={l.id} value={l.name}>
                     {l.title || l.name}
                   </SelectItem>
@@ -1189,6 +1250,20 @@ export function MapPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <AiAssistant
+        open={aiOpen}
+        onOpenChange={setAiOpen}
+        context={{
+          visibleLayers: ordered
+            .filter((l) => ws.layers[l.name]?.visible !== false)
+            .map((l) => l.name),
+          selectedLayer: selected?.layer ?? drawLayerName,
+          bounds: mapView?.bounds,
+        }}
+        onAction={applyAIAction}
+        onFocusFeature={(layer, fid) => void focusFeature(layer, fid, true)}
+      />
 
       <StyleEditor
         layer={styleLayer}

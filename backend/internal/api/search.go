@@ -48,6 +48,18 @@ func (h *Handlers) search(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 	}
+	if external, err := h.readableExternalLayers(r.Context()); err == nil {
+		for _, l := range external {
+			if strings.Contains(strings.ToLower(l.Name), lower) ||
+				strings.Contains(strings.ToLower(l.Title), lower) ||
+				strings.Contains(strings.ToLower(l.Description), lower) {
+				layerHits = append(layerHits, map[string]any{
+					"name": l.Name, "title": l.Title, "geometryType": "RASTER",
+					"featureCount": 0, "external": true,
+				})
+			}
+		}
+	}
 
 	type featureHit struct {
 		Layer      string          `json:"layer"`

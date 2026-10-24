@@ -36,6 +36,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { to: "/map", label: "地图", icon: MapIcon },
   { to: "/projection", label: "投影", icon: Globe2 },
+  { to: "/providers", label: "服务商", icon: Globe2 },
   { to: "/layers", label: "图层", icon: Layers },
   { to: "/data", label: "数据", icon: Database },
   { to: "/styles", label: "样式", icon: Palette },

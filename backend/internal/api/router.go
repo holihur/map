@@ -94,7 +94,7 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   cfg.CORSOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "If-None-Match", "X-API-Key"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "If-None-Match", "X-API-Key", "X-AI-API-Key", "X-AI-Base-URL", "X-AI-Model"},
 		ExposedHeaders:   []string{"Content-Length", "ETag"},
 		AllowCredentials: false,
 		MaxAge:           300,
@@ -138,6 +138,9 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 	})
 	r.With(adminOnly).Get("/api/audit", h.listAuditLogs)
 
+	// 自然语言地图助手（BYOK，OpenAI 兼容 / ADK 风格工具调用）
+	r.With(h.auth.RequireAuth).Post("/api/ai/chat", h.aiChat)
+
 	// 认证
 	r.Post("/api/auth/login", h.login)
 	r.With(h.auth.RequireAuth).Get("/api/auth/me", h.me)
@@ -179,6 +182,23 @@ func NewRouter(st *store.Store, cfg config.Config, log *slog.Logger) http.Handle
 			r.With(editorOnly).Delete("/features/{fid}", h.deleteFeature)
 		})
 	})
+
+	// 第三方图层（XYZ / WMS / WMTS / MVT / GeoJSON / ArcGIS）
+	r.Route("/api/external-layers", func(r chi.Router) {
+		r.Get("/", h.listExternalLayers)
+		r.With(editorOnly).Post("/", h.createExternalLayer)
+		r.Route("/{name}", func(r chi.Router) {
+			r.Get("/", h.getExternalLayer)
+			r.Get("/tile/{z}/{x}/{y}", h.externalTile)
+			r.Get("/data", h.externalData)
+			r.With(editorOnly).Patch("/", h.updateExternalLayer)
+			r.With(editorOnly).Put("/", h.updateExternalLayer)
+			r.With(editorOnly).Delete("/", h.deleteExternalLayer)
+		})
+	})
+
+	// 内置第三方底图代理（高德 / Google，避免 CORS）
+	r.Get("/api/basemaps/{id}/tile/{z}/{x}/{y}", h.basemapTile)
 
 	r.Get("/api/tiles/{layer}/{z}/{x}/{y}.mvt", h.tileMVT)
 	r.Get("/api/tiles/{layer}/{z}/{x}/{y}.pbf", h.tileMVT)

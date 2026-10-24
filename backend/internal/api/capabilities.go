@@ -42,6 +42,23 @@ func (h *Handlers) capabilities(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
+		external, _ := h.readableExternalLayers(r.Context())
+		type externalInfo struct {
+			Name       string `json:"name"`
+			Title      string `json:"title"`
+			SourceType string `json:"sourceType"`
+			MinZoom    int    `json:"minZoom"`
+			MaxZoom    int    `json:"maxZoom"`
+			Visibility string `json:"visibility"`
+		}
+		extInfos := make([]externalInfo, 0, len(external))
+		for _, l := range external {
+			extInfos = append(extInfos, externalInfo{
+				Name: l.Name, Title: l.Title, SourceType: l.SourceType,
+				MinZoom: l.MinZoom, MaxZoom: l.MaxZoom, Visibility: l.Visibility,
+			})
+		}
+
 		doc := map[string]any{
 			"service":     "MapServer",
 			"version":     "1.0.0",
@@ -63,8 +80,9 @@ func (h *Handlers) capabilities(w http.ResponseWriter, r *http.Request) {
 				"features": []string{"application/geo+json"},
 				"images":   []string{"image/png"},
 			},
-			"layers": infos,
-			"styles": styles,
+			"layers":         infos,
+			"externalLayers": extInfos,
+			"styles":         styles,
 		}
 		writeJSON(w, http.StatusOK, doc)
 	}

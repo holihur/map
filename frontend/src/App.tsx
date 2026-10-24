@@ -9,6 +9,7 @@ import { LayersPage } from "@/pages/LayersPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SharedMapPage } from "@/pages/SharedMapPage";
 import { PublishPage } from "@/pages/PublishPage";
+import { ProvidersPage } from "@/pages/ProvidersPage";
 import { MapPage } from "@/pages/MapPage";
 import { StylesPage } from "@/pages/StylesPage";
 import { UsersPage } from "@/pages/UsersPage";
@@ -51,6 +52,7 @@ export function App() {
         <Route path="/styles" element={<StylesPage />} />
         <Route path="/capabilities" element={<CapabilitiesPage />} />
         <Route path="/publish" element={<PublishPage />} />
+        <Route path="/providers" element={<ProvidersPage />} />
         <Route path="/users" element={<UsersPage />} />
         <Route path="*" element={<Navigate to="/map" replace />} />
       </Route>

@@ -233,3 +233,53 @@ func (l *Layer) PropertyColumns() []string {
 	}
 	return cols
 }
+
+// ExternalLayer 第三方图层（不落 PostGIS，直接由客户端/瓦片服务渲染）。
+type ExternalLayer struct {
+	ID            int64           `json:"id"`
+	Name          string          `json:"name"`
+	Title         string          `json:"title"`
+	Description   string          `json:"description"`
+	SourceType    string          `json:"sourceType"` // xyz / wms / wmts / mvt / geojson / arcgis
+	SourceURL     string          `json:"sourceUrl"`
+	SourceOptions json.RawMessage `json:"sourceOptions"`
+	Style         json.RawMessage `json:"style"`
+	Metadata      json.RawMessage `json:"metadata"`
+	MinZoom       int             `json:"minZoom"`
+	MaxZoom       int             `json:"maxZoom"`
+	SortOrder     int             `json:"sortOrder"`
+	Visibility    string          `json:"visibility"`
+	CreatedAt     time.Time       `json:"createdAt"`
+	UpdatedAt     time.Time       `json:"updatedAt"`
+}
+
+// CreateExternalLayerRequest 创建第三方图层。
+type CreateExternalLayerRequest struct {
+	Name          string          `json:"name"`
+	Title         string          `json:"title"`
+	Description   string          `json:"description"`
+	SourceType    string          `json:"sourceType"`
+	SourceURL     string          `json:"sourceUrl"`
+	SourceOptions json.RawMessage `json:"sourceOptions"`
+	Style         json.RawMessage `json:"style"`
+	Metadata      json.RawMessage `json:"metadata"`
+	MinZoom       *int            `json:"minZoom"`
+	MaxZoom       *int            `json:"maxZoom"`
+	SortOrder     *int            `json:"sortOrder"`
+	Visibility    *string         `json:"visibility"`
+}
+
+// UpdateExternalLayerRequest 更新第三方图层。
+type UpdateExternalLayerRequest struct {
+	Title         *string         `json:"title"`
+	Description   *string         `json:"description"`
+	SourceType    *string         `json:"sourceType"`
+	SourceURL     *string         `json:"sourceUrl"`
+	SourceOptions json.RawMessage `json:"sourceOptions"`
+	Style         json.RawMessage `json:"style"`
+	Metadata      json.RawMessage `json:"metadata"`
+	MinZoom       *int            `json:"minZoom"`
+	MaxZoom       *int            `json:"maxZoom"`
+	SortOrder     *int            `json:"sortOrder"`
+	Visibility    *string         `json:"visibility"`
+}

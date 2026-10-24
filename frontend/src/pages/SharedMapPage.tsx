@@ -8,7 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Switch } from "@/components/ui/switch";
-import { getMap, listLayers } from "@/lib/api";
+import { getMap, listExternalLayers, listLayers } from "@/lib/api";
+import { mergeLayers } from "@/lib/external";
 import { normalizeWorkspace } from "@/lib/workspace";
 import type { Layer, MapWorkspace, SharedMap } from "@/types";
 
@@ -23,11 +24,16 @@ export function SharedMapPage() {
     let alive = true;
     void (async () => {
       try {
-        const [m, ls] = await Promise.all([getMap(token), listLayers()]);
+        const [m, ls, ext] = await Promise.all([
+          getMap(token),
+          listLayers(),
+          listExternalLayers(),
+        ]);
         if (!alive) return;
+        const merged = mergeLayers(ls, ext);
         setMap(m);
-        setLayers(ls);
-        setWs(normalizeWorkspace(m.state, ls));
+        setLayers(merged);
+        setWs(normalizeWorkspace(m.state, merged));
       } catch (err) {
         toast.error((err as Error).message);
       } finally {

@@ -38,6 +38,10 @@
 | 搜索定位 | 图层名、标题、描述与文本属性全文搜索，结果一键定位 |
 | 上传建层 | 拖拽 GeoJSON / CSV / Shapefile / GeoPackage，自动推断几何类型与字段类型，预览后一次建层导入 |
 | 发布治理 | 私有图层 + 用户级读/写授权、第三方 API Key、写操作审计日志 |
+| 第三方图层 | XYZ / WMS / WMTS / MVT / GeoJSON / ArcGIS；内置高德、腾讯、天地图、Google、Mapbox、Esri、CARTO、MapTiler、HERE、TomTom、OpenStreetMap 等服务商预设 |
+| CORS 代理 | 第三方瓦片/GeoJSON 可经后端代理，自动替换 z/x/y、TMS 负 Y、WMS BBOX，避免浏览器跨域限制并缓存 |
+| 服务商预览 | `/providers` 页用 OpenLayers 预览全部服务商；百度 BD-09M 自定义投影在此视图中正确显示，并可一键添加到主地图（MapLibre 兼容项） |
+| 自然语言助手 | BYOK（用户自带模型 Key）+ Go 工具调用（ADK 风格）；支持查询、统计、空间分析、定位、打开数据表、批量改/删；默认 DeepSeek |
 | 瓦片性能 | 按缩放级别简化几何、单瓦片要素上限、低缩放级别自动收紧，避免大数据拖垮瓦片 |
 | 鉴权与权限 | JWT 登录 + RBAC（admin / editor / viewer），写操作受保护 |
 | 瓦片缓存 | 内存 LRU + TTL 缓存，图层要素变更时按图层失效 |
@@ -118,6 +122,9 @@ make serve        # 构建前端 → 内嵌进 Go → 启动，浏览器访问 h
 | `TOKEN_TTL_HOURS` | `72` | 登录 Token 有效期 |
 | `RATE_LIMIT_RPS` / `RATE_LIMIT_BURST` | `30` / `60` | 按 IP 限流（0 禁用） |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / `admin123` | 首次启动自动创建的管理员 |
+| `AI_BASE_URL` | `https://api.deepseek.com/v1` | 默认模型服务（OpenAI 兼容） |
+| `AI_MODEL` | `deepseek-chat` | 默认模型 |
+| `AI_TIMEOUT_SECONDS` | `60` | 模型请求超时 |
 | `TILE_MAX_FEATURES` | `5000` | 单个矢量瓦片最多编码要素数（低缩放自动收紧） |
 | `TILE_SIMPLIFY` | `true` | 是否按瓦片分辨率简化几何 |
 | `TILE_CACHE_ENTRIES` | `2048` | 瓦片缓存条目数（0 禁用） |
@@ -148,6 +155,42 @@ make docker-db   # docker compose up -d db（需自行拉取 postgis 镜像）
 - **API Key**：管理员在「发布」页创建，第三方请求使用 `X-API-Key: ms_...` 或 `?api_key=ms_...`；可限定到单个图层。
 - **分享地图**：地图页「分享」生成 `/share/{token}`，保存视角、底图、图层顺序/可见性/透明度；公开链接无需登录。
 - **审计**：所有写操作（POST/PUT/PATCH/DELETE）自动记录用户、路径、状态、IP，管理员在「发布 → 审计日志」查看。
+
+## 第三方图层与地图服务商
+
+支持把第三方地图作为**底图或叠加层**，不需要导入 PostGIS：
+
+- **类型**：XYZ 栅格瓦片、WMS、WMTS、MVT 矢量瓦片、GeoJSON URL、ArcGIS 瓦片。
+- **内置服务商**：OpenStreetMap、CARTO、Esri、OpenTopoMap、Google、Mapbox、MapTiler、HERE、TomTom、高德、腾讯、天地图、百度（OpenLayers 投影视图）。
+- **Token 预设**：Mapbox / MapTiler / HERE / TomTom / 天地图在添加时填写自己的 Key，保存后写入图层 URL。
+- **代理**：默认经 `/api/external-layers/{name}/tile/...` 代理，自动处理 `{z}/{x}/{y}`、TMS `{-y}`、`{bbox-epsg-3857}`、WMS `BBOX`，避免 CORS 并缓存。
+- **坐标系说明**：高德 / 腾讯 / Google 国内数据为 GCJ-02，与 WGS84 数据叠加存在偏移；百度使用 BD-09M，MapLibre 无法直接渲染，请在 `/providers` 页用 OpenLayers 查看。
+
+入口：**图层 → 第三方图层 → 添加**，或 **服务商** 页预览后一键添加到主地图。
+
+## 自然语言地图助手（BYOK）
+
+地图页点击「AI 助手」，使用**你自己的模型 API Key**（Bring Your Own Key），后端只做代理与工具调用，不落库、不写日志。
+
+- **默认模型**：DeepSeek `https://api.deepseek.com/v1` + `deepseek-chat`。
+- **兼容服务**：OpenAI、Moonshot、智谱 GLM、Ollama 等任何 OpenAI 兼容 `/chat/completions` 接口。
+- **工具（ADK 风格）**：`list_layers`、`query_features`、`layer_stats`、`search`、`analyze_features`、`map_action`、`update_features`、`delete_features`。
+- **地图动作**：定位图层、飞到 bbox、高亮要素、打开数据表、切换图层可见性。
+- **写操作保护**：默认关闭；只有用户在前端打开「允许写操作」且账号具备 editor 权限、图层写权限时，AI 才能批量修改/删除，且必须提供 ids 或 filters/bbox。
+- **密钥存储**：仅保存在浏览器 `localStorage`，随请求头 `X-AI-API-Key` 发送；服务端不持久化。
+
+示例：
+
+```bash
+# 前端会自动带 JWT 与 BYOK 头；这里演示协议
+curl -X POST localhost:8420/api/ai/chat \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-AI-API-Key: $DEEPSEEK_API_KEY" \
+  -H "X-AI-Base-URL: https://api.deepseek.com/v1" \
+  -H "X-AI-Model: deepseek-chat" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"查找人口超过 1000 万的城市并定位到第一个"}],"allowWrite":false}'
+```
 
 ## API
 
@@ -195,6 +238,11 @@ make docker-db   # docker compose up -d db（需自行拉取 postgis 镜像）
 | GET/POST | `/api/apikeys` | admin | 列出 / 创建第三方 API Key（明文仅返回一次） |
 | POST/DELETE | `/api/apikeys/{id}` | admin | 吊销 / 删除 API Key |
 | GET | `/api/audit` | admin | 写操作审计日志（`limit`、`layer`） |
+| GET/POST | `/api/external-layers` | 读公开 / 写 editor | 第三方图层列表 / 创建（XYZ、WMS、WMTS、MVT、GeoJSON、ArcGIS） |
+| GET/PATCH/DELETE | `/api/external-layers/{name}` | 读公开 / 写 editor | 第三方图层详情 / 更新 / 删除 |
+| GET | `/api/external-layers/{name}/tile/{z}/{x}/{y}` | 公开 | 代理第三方瓦片（解决 CORS，支持 `{-y}`、WMS BBOX） |
+| GET | `/api/external-layers/{name}/data` | 公开 | 代理第三方 GeoJSON 数据 |
+| POST | `/api/ai/chat` | 登录 | BYOK 自然语言地图助手（OpenAI 兼容 / DeepSeek，工具调用） |
 | GET | `/api/export?format=gpkg` | 公开 | 全部图层导出为单个 GeoPackage |
 | GET | `/metrics` | 公开 | Prometheus 指标 |
 | POST | `/api/styles/sld?name=` | editor | 上传 SLD 文档到样式库 |
